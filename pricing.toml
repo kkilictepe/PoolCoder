@@ -1,0 +1,36 @@
+# pool-coder pricing table — USD per 1,000,000 tokens. EDIT FREELY.
+#
+# Base input/output are Anthropic list prices. Cache rates use the standard
+# prompt-caching multipliers: cache_write ~= 1.25x input (5-minute cache),
+# cache_read ~= 0.1x input. Claude Code mixes 5m/1h caches, so the cost figure
+# is an estimate, not a bill. Point the CLI at this file with `--pricing`.
+
+[default]
+input = 5.0
+output = 25.0
+cache_write = 6.25
+cache_read = 0.5
+
+[opus]      # Claude Opus 4.x  ($5 / $25)
+input = 5.0
+output = 25.0
+cache_write = 6.25
+cache_read = 0.5
+
+[sonnet]    # Claude Sonnet 4.x  ($3 / $15)
+input = 3.0
+output = 15.0
+cache_write = 3.75
+cache_read = 0.3
+
+[haiku]     # Claude Haiku 4.5  ($1 / $5)
+input = 1.0
+output = 5.0
+cache_write = 1.25
+cache_read = 0.1
+
+[fable]     # Claude Fable 5 / Mythos 5  ($10 / $50)
+input = 10.0
+output = 50.0
+cache_write = 12.5
+cache_read = 1.0
