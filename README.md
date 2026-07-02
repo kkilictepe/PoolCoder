@@ -85,7 +85,9 @@ unauthenticated** — only expose it on a network you trust (use
 
 - **Context window** — Opus can be 200K or 1M and the JSONL `model` field can't
   tell them apart, so it defaults to **1M** (auto-detected up to 1M once context
-  exceeds 200K). Override with `--window opus=200000`.
+  exceeds 200K). Fable/Mythos always ship with a 1M window, so that family
+  defaults to **1M** too. Override with `--window opus=200000` (families:
+  `opus`, `fable`, `sonnet`, `haiku`).
 - **Pricing** — edit [`pricing.toml`](./pricing.toml) (USD per 1M tokens, per
   model family) and pass it with `--pricing`. Cost is an estimate.
 - **Plan limits** — reads `~/.claude/.credentials.json` and polls the usage

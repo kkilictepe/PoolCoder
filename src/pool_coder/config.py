@@ -4,7 +4,8 @@ Context-window sizes for Opus cannot be inferred from the JSONL ``model``
 string (it lacks the ``[1m]`` marker), so the limit is configurable. We
 default Opus to 1,000,000 to match this repo's Grafana dashboard convention,
 with a guard that auto-bumps to 1M for any model once observed context
-exceeds the standard 200K window.
+exceeds the standard 200K window. Fable/Mythos ship with a 1M window (it is
+both the default and the maximum), so that family defaults to 1M outright.
 """
 
 from __future__ import annotations
@@ -14,9 +15,10 @@ from dataclasses import dataclass
 OPUS_1M = 1_000_000
 STANDARD_WINDOW = 200_000
 
-# Per-family defaults. Opus -> 1M (repo convention); others -> 200K.
+# Per-family defaults. Opus/Fable -> 1M; others -> 200K.
 DEFAULT_WINDOWS = {
     "opus": OPUS_1M,
+    "fable": OPUS_1M,
     "sonnet": STANDARD_WINDOW,
     "haiku": STANDARD_WINDOW,
     "default": STANDARD_WINDOW,
@@ -47,6 +49,9 @@ def model_family(model: str | None) -> str:
     if not model:
         return "default"
     low = model.lower()
+    # Mythos 5 is the same model tier as Fable 5 (same window and pricing).
+    if "fable" in low or "mythos" in low:
+        return "fable"
     for fam in ("opus", "sonnet", "haiku"):
         if fam in low:
             return fam
@@ -56,6 +61,7 @@ def model_family(model: str | None) -> str:
 @dataclass
 class Config:
     opus_window: int = DEFAULT_WINDOWS["opus"]
+    fable_window: int = DEFAULT_WINDOWS["fable"]
     sonnet_window: int = DEFAULT_WINDOWS["sonnet"]
     haiku_window: int = DEFAULT_WINDOWS["haiku"]
     auto_bump: bool = True
@@ -67,6 +73,7 @@ class Config:
         fam = model_family(model)
         base = {
             "opus": self.opus_window,
+            "fable": self.fable_window,
             "sonnet": self.sonnet_window,
             "haiku": self.haiku_window,
         }.get(fam, DEFAULT_WINDOWS["default"])
@@ -84,6 +91,8 @@ class Config:
             raise ValueError(f"invalid --window value: {spec!r}") from None
         if fam == "opus":
             self.opus_window = tokens
+        elif fam in ("fable", "mythos"):
+            self.fable_window = tokens
         elif fam == "sonnet":
             self.sonnet_window = tokens
         elif fam == "haiku":

@@ -16,6 +16,13 @@ def test_default_rates_and_cost_math():
     assert p.cost(UsageTokens(cache_read=1_000_000), "claude-opus-4-8") == 0.5
 
 
+def test_fable_family_rates():
+    p = Pricing.load()
+    # 1M input on fable == $10.00; mythos shares the fable family
+    assert p.cost(UsageTokens(input=1_000_000), "claude-fable-5") == 10.0
+    assert p.cost(UsageTokens(output=1_000_000), "claude-mythos-5") == 50.0
+
+
 def test_unknown_model_falls_back_to_default():
     p = Pricing.load()
     assert p.cost(UsageTokens(input=1_000_000), "some-future-model") == 5.0
