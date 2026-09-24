@@ -1,7 +1,7 @@
 [project]
 name = "pool-coder"
 version = "0.1.0"
-description = "Realtime Claude Code session monitor — a terminal dashboard over ~/.claude/projects/*.jsonl"
+description = "Realtime Claude Code & Codex session monitor — a terminal/web dashboard over local session transcripts"
 readme = "README.md"
 authors = [
     { name = "kkilictepe", email = "7527765+kkilictepe@users.noreply.github.com" }

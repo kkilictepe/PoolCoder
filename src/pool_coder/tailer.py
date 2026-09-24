@@ -2,11 +2,12 @@
 
 Safety contract (the #1 requirement): we only ever open files read-only in
 binary mode and never write/flush/truncate them. CPython's default ``open``
-on Windows shares read+write+delete, so this cannot block Claude Code's
-appends.
+on Windows shares read+write (not delete), so this cannot block the agent's
+appends; a rename or delete of the file fails only while a read is under way.
 
-Each ``poll()`` does: ``stat`` -> (maybe) ``open`` -> ``seek`` -> ``read`` a
-bounded chunk -> ``close``. We never hold a handle between polls. Complete,
+Each ``poll()`` does: ``stat`` -> (only if the file grew) ``open`` -> ``seek``
+-> ``read`` a bounded chunk -> ``close``, keeping that window to the
+milliseconds of a read. We never hold a handle between polls. Complete,
 newline-terminated lines are returned; a partial trailing line is buffered as
 *bytes* until its newline arrives (this also structurally excludes
 half-written JSON and rejoins UTF-8 sequences split across reads).

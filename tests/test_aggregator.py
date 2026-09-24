@@ -111,6 +111,23 @@ def test_reset_main_clears_main_but_keeps_subagent_tokens():
     assert agg.state.source_tokens("agent:a1").input == 7
 
 
+def test_reset_main_keeps_discovered_workflows_subagents_and_session_details():
+    # discovery registers workflows and subagents only once, so a transcript
+    # rotation must not drop them (nor the branch/version read from main)
+    agg = make()
+    agg.register_workflow("wf1", "review", "adversarial review", [("Review", "")])
+    agg.apply("wfjournal:wf1", Record({"type": "started", "key": "k1", "agentId": "a1"}))
+    agg.register_subagent("a1", "Explore", "explore the repo", parent_tool_use_id="t9")
+    agg.apply("main", asst(usage=usage(inp=50), request_id="r1", gitBranch="main", version="2.1.280"))
+    agg.reset_source("main")
+    st = agg.state
+    wf = st.workflows["wf1"]
+    assert (wf.name, [p.title for p in wf.phases], wf.started_keys) == ("review", ["Review"], {"k1"})
+    assert st.subagents["a1"].agent_type == "Explore"
+    assert (st.git_branch, st.version, st.model) == ("main", "2.1.280", "claude-opus-4-8")
+    assert st.latest_usage.input == 50  # stale until the replay, as before
+
+
 def test_assistant_text_thinking_and_todo_events():
     agg = make()
     rec = Record({"type": "assistant", "requestId": "r1", "timestamp": TS, "message": {

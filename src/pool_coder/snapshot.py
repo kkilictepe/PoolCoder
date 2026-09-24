@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-from .config import AUTO_COMPACT_FRACTION, Config, LIVE_WINDOW_SECONDS
+from .config import Config, LIVE_WINDOW_SECONDS
 from .models import UsageTokens
 from .pricing import Pricing
 from .state import SessionState
@@ -79,6 +79,13 @@ class PlanLimitsView:
     seven_day_resets_at: datetime | None = None
     extra_enabled: bool = False
     extra_pct: float | None = None
+    # Codex: limits come from local transcripts, so they carry their own age,
+    # plan and window labels (Claude keeps the defaults).
+    as_of: datetime | None = None
+    plan_type: str | None = None
+    note: str | None = None
+    five_hour_label: str = "5-hour"
+    seven_day_label: str = "weekly"
 
 
 @dataclass(frozen=True)
@@ -131,6 +138,7 @@ class SessionSnapshot:
     subagents_running: int
     workflows: tuple[WorkflowView, ...]
     workflows_running_agents: int
+    agent: str = "claude"
 
 
 @dataclass(frozen=True)
@@ -151,10 +159,15 @@ def build_session_snapshot(
 ) -> SessionSnapshot:
     now = now or datetime.now(timezone.utc)
 
-    window = config.window_for(state.model, state.max_context_tokens)
+    # A window reported by the transcript (Codex) wins over the configured one.
+    # A Codex thread with no model yet is still gpt-family (never the 200K
+    # default or its 1M auto-bump), matching the picker preview.
+    model = state.model or ("gpt" if state.agent == "codex" else None)
+    window = state.context_window or config.window_for(model, state.max_context_tokens,
+                                                       state.agent)
     current = state.current_context_tokens
     occupancy = (current / window) if window else 0.0
-    auto_compact_at = int(window * AUTO_COMPACT_FRACTION)
+    auto_compact_at = int(window * state.auto_compact_fraction)
 
     cumulative = state.cumulative_tokens()
     duration_s = _elapsed(state.started_at, state.last_record_at or now)
@@ -162,7 +175,7 @@ def build_session_snapshot(
 
     by_model = state.model_breakdown()
     cost_by_model = sorted(
-        ((m, pricing.cost(u, m)) for m, u in by_model.items()),
+        ((m, pricing.cost(u, m, state.agent)) for m, u in by_model.items()),
         key=lambda kv: kv[1],
         reverse=True,
     )
@@ -190,6 +203,7 @@ def build_session_snapshot(
     )
     events = tuple(EventView(e.at, e.kind, e.text) for e in state.events)
 
+    per_source = state.source_billable_totals()
     subs = []
     for sub in state.subagents.values():
         subs.append(SubagentView(
@@ -200,7 +214,7 @@ def build_session_snapshot(
             turns=sub.turns,
             in_flight_tools=sub.in_flight_tools,
             last_tool=sub.last_tool,
-            tokens=state.source_tokens(f"agent:{sub.agent_id}").billable_total,
+            tokens=per_source.get(f"agent:{sub.agent_id}", 0),
             elapsed_s=_elapsed(sub.started_at, sub.last_activity or now),
         ))
     subs.sort(key=lambda s: (not s.running, -s.tokens))
@@ -216,7 +230,7 @@ def build_session_snapshot(
             running_agents=wf.running_agents,
             completed_agents=wf.completed_agents,
             total_agents=wf.total_agents,
-            tokens=state.source_tokens(f"wfagent:{wf.run_id}").billable_total,
+            tokens=per_source.get(f"wfagent:{wf.run_id}", 0),
         ))
     wfs.sort(key=lambda w: (-w.running_agents, -w.total_agents))
     wf_running = sum(w.running_agents for w in wfs)
@@ -270,4 +284,5 @@ def build_session_snapshot(
         subagents_running=subagents_running,
         workflows=tuple(wfs),
         workflows_running_agents=wf_running,
+        agent=state.agent,
     )
