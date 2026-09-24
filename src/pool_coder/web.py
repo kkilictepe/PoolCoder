@@ -774,7 +774,7 @@ def fragment_list(config: Config) -> str:
     if not sessions:
         agent = "" if prov is CLAUDE else f"{esc(prov.label)} "
         return (header + f"<div class=dim style='padding:20px'>"
-                f"No active {agent}sessions in the last 30 min.</div>")
+                f"No active {agent}sessions in the last 15 min.</div>")
     rows = []
     for info in sessions:
         ov = prov.peek_session(info, config)

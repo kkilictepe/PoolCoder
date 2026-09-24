@@ -89,7 +89,7 @@ def test_app_constructs_with_codex_config():
 def test_codex_picker_lists_codex_sessions(codex_home):
     _write_session(codex_home)
     title, rows, sub_title = _picker_state(Config(agent="codex"))
-    assert title.startswith("Select a Codex session to monitor — 1 active (30m).")
+    assert title.startswith("Select a Codex session to monitor — 1 active (15m).")
     assert [sid for sid, _ in rows] == [cr.ROOT]  # the sub-agent thread is rolled up
     text = rows[0][1]                             # previewed by the Codex overview
     assert "gpt-5.6-terra" in text and "rootproj" in text and "fix the flaky test" in text
@@ -115,7 +115,7 @@ def test_codex_picker_marks_a_thread_name_standing_in_for_the_prompt(monkeypatch
 def test_claude_picker_title_unchanged(monkeypatch):
     monkeypatch.setattr(paths, "list_sessions", lambda *a, **k: [])
     title, rows, sub_title = _picker_state(Config())
-    assert title.startswith("Select a session to monitor — 0 active (30m).  ↑/↓ move")
+    assert title.startswith("Select a session to monitor — 0 active (15m).  ↑/↓ move")
     assert rows == [] and sub_title == ""
 
 

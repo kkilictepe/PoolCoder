@@ -66,7 +66,7 @@ class PickerScreen(Screen):
         sessions = self.provider.list_sessions()
         if not self.show_all:
             sessions = [s for s in sessions if s.age_seconds() <= self.config.active_window_seconds]
-        scope = "all" if self.show_all else "active (30m)"
+        scope = "all" if self.show_all else "active (15m)"
         agent = "" if self.provider is CLAUDE else f"{self.provider.label} "
         self.query_one("#picker-title", Static).update(
             Text(f"Select a {agent}session to monitor — {len(sessions)} {scope}.  "

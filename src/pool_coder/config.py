@@ -53,7 +53,7 @@ CODEX_LIMITS_INTERVAL = 30  # local rollout rescans only (no network)
 
 # Liveness windows (seconds).
 LIVE_WINDOW_SECONDS = 60      # "● live" badge
-ACTIVE_WINDOW_SECONDS = 1800  # default picker "recent/active" filter (30 min)
+ACTIVE_WINDOW_SECONDS = 900   # default picker "recent/active" filter (15 min)
 
 
 _O_SERIES = re.compile(r"^o\d")  # o3, o4-mini, ...

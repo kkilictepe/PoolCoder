@@ -324,7 +324,7 @@ def test_codex_list_marks_a_thread_name_standing_in_for_the_prompt(monkeypatch):
 
 def test_codex_fragment_list_empty(codex_home):
     frag = web.fragment_list(Config(agent="codex"))
-    assert "No active Codex sessions in the last 30 min." in frag
+    assert "No active Codex sessions in the last 15 min." in frag
     assert "href='/all'>Monitor all</a>" in frag
 
 
@@ -339,7 +339,7 @@ def test_claude_fragment_list_text_unchanged(monkeypatch):
     assert "href='/s/sess-1'" in frag
     assert "<title>pool-coder</title>" in web.page_list(Config())
     monkeypatch.setattr(paths, "list_sessions", lambda *a, **k: [])
-    assert "No active sessions in the last 30 min." in web.fragment_list(Config())
+    assert "No active sessions in the last 15 min." in web.fragment_list(Config())
 
 
 def _loaded(manager: web.EngineManager, sid: str, timeout: float = 10.0) -> Snapshot | None:

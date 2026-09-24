@@ -86,7 +86,7 @@ positions as activity changes, and new sessions append to the right. It
 combines recent activity into an **All** tab plus one tab per session. Hide
 buttons remove uninteresting sessions from both areas and remember that choice
 in the browser. The normal
-window is the last 30 minutes; starting the server with `--all` expands this
+window is the last 15 minutes; starting the server with `--all` expands this
 view to all available sessions. A per-session JSON feed remains available at
 `/api/s/<id>`. Pin a single session with `--session <id>` (the direct `/all`
 URL still works). It's

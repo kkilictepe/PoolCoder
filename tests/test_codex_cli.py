@@ -265,7 +265,7 @@ def test_list_marks_a_thread_name_standing_in_for_the_prompt(session, capsys, mo
 def test_list_without_codex_sessions(codex_home, capsys):
     assert main(["--codex", "--list"]) == 0
     assert capsys.readouterr().out == (
-        "No active Codex sessions in the last 30 min. Use --all to show older ones.\n")
+        "No active Codex sessions in the last 15 min. Use --all to show older ones.\n")
 
 
 # -- choosing a session -----------------------------------------------------------------
@@ -288,7 +288,7 @@ def test_once_without_session_picks_most_recently_active(session, codex_home, ca
 
 
 def test_once_without_session_falls_back_to_newest_idle(session, codex_home, capsys):
-    # Nothing active in the last 30 min: the newest by record time is used.
+    # Nothing active in the last 15 min: the newest by record time is used.
     # Fixed mtimes before every record (never relative to the clock), OTHER's
     # the older one and its file name sorting last: only its later records
     # can make it win, whatever the date or the directory order.
@@ -323,7 +323,7 @@ def test_claude_list_and_error_strings_unchanged(monkeypatch, capsys):
     monkeypatch.setattr(paths, "find_session", lambda *a, **k: None)
     assert main(["--list"]) == 0
     assert capsys.readouterr().out == (
-        "No active sessions in the last 30 min. Use --all to show older ones.\n")
+        "No active sessions in the last 15 min. Use --all to show older ones.\n")
     assert main(["--once", "--session", "abc"]) == 1
     assert capsys.readouterr().err == "error: no matching session (try `pool-coder --list`)\n"
 
@@ -456,7 +456,7 @@ def test_headless_codex_path_does_not_import_ui(session, codex_home, tmp_path):
     assert "codex v0.155.0" in parts[0] and "PLAN      5-hour 40%" in parts[0]
     assert json.loads(parts[1])["session"]["agent"] == "codex"
     assert "rootproj" in parts[2] and "childproj" not in parts[2]
-    assert parts[3].startswith("No active sessions in the last 30 min.")
+    assert parts[3].startswith("No active sessions in the last 15 min.")
 
 
 def test_cli_module_has_no_ui_imports_at_top_level():

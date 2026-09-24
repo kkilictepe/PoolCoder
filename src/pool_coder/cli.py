@@ -90,7 +90,7 @@ def print_session_list(config: Config, show_all: bool) -> None:
         sessions = [s for s in sessions if s.age_seconds() <= config.active_window_seconds]
     if not sessions:
         agent = "" if prov is CLAUDE else f"{prov.label} "
-        print(f"No active {agent}sessions in the last 30 min. Use --all to show older ones.")
+        print(f"No active {agent}sessions in the last 15 min. Use --all to show older ones.")
         return
     print(f"{'':3}{'AGE':>10}  {'CTX':>5}  {'MODEL':<16} {'PROJECT':<22} LAST")
     for s in sessions[:60]:
