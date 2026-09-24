@@ -4,6 +4,9 @@ A second renderer over the same decoupled core. ``EngineManager`` lazily runs
 one ``Engine`` per viewed session (idle-evicted, capped) and shares a single
 plan-limits poller. The HTTP layer reads immutable snapshots and renders HTML —
 it never touches mutable state. Stdlib only (matches ``usage-exporter``).
+Sessions, previews and the plan poller come from the provider of
+``config.agent`` (Claude Code or Codex); Codex differs only in the tokens and
+plan cards.
 
 Endpoints:
     GET /                 session list (auto-refreshing)
@@ -20,6 +23,7 @@ import dataclasses
 import datetime as _dt
 import html
 import json
+import os
 import socket
 import threading
 import time
@@ -29,12 +33,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from .config import Config
 from .engine import Engine
 from .format import (
-    fmt_age, fmt_clock, fmt_duration, fmt_int, fmt_pct, fmt_pct100, fmt_tokens, fmt_usd, reset_in,
+    fmt_age, fmt_clock, fmt_duration, fmt_int, fmt_pct, fmt_pct100, fmt_tokens, fmt_usd,
+    limit_window, reset_in, short_id, short_model,
 )
-from .overview import peek_session
-from .paths import find_session, list_sessions
 from .pricing import Pricing
-from .snapshot import Snapshot
+from .providers import CLAUDE, get_provider
+from .snapshot import PlanLimitsView, SessionSnapshot, Snapshot
 
 esc = html.escape
 
@@ -42,6 +46,18 @@ esc = html.escape
 # --------------------------------------------------------------------------- #
 # Engine lifecycle
 # --------------------------------------------------------------------------- #
+def _transcript_gone(engine: Engine) -> bool:
+    """One stat: has the engine's transcript been deleted? Only a definite
+    "not found" counts (a transient Windows sharing error must not restart it)."""
+    try:
+        os.stat(engine.state.main_path)
+    except FileNotFoundError:
+        return True
+    except OSError:
+        pass
+    return False
+
+
 class EngineManager:
     """Lazily runs an Engine per viewed session; evicts idle ones."""
 
@@ -54,8 +70,9 @@ class EngineManager:
         self._engines: dict[str, Engine] = {}
         self._last: dict[str, float] = {}
         self._lock = threading.Lock()
-        from .sources.plan_limits import PlanLimitsSource
-        self.plan = PlanLimitsSource() if (enable_plan_limits and config.plan_limits) else None
+        self.provider = get_provider(config.agent)
+        self.plan = (self.provider.make_plan_source()
+                     if (enable_plan_limits and config.plan_limits) else None)
         if self.plan:
             self.plan.start()
 
@@ -70,18 +87,39 @@ class EngineManager:
             self._last.pop(sid, None)
 
     def snapshot(self, session_id: str) -> Snapshot | None:
-        info = find_session(session_id)
-        if info is None:
-            return None
         now = time.monotonic()
+        # one engine per session however the URL spells it (Codex ids match
+        # case-insensitively; Claude ids exactly, as before)
+        session_id = self.provider.normalize_id(session_id)
         with self._lock:
             self._evict_locked(now)
             engine = self._engines.get(session_id)
-            if engine is None:
-                engine = Engine(info, self.config, self.pricing, enable_plan_limits=False)
-                engine.start()
-                self._engines[session_id] = engine
-            self._last[session_id] = now
+            if engine is not None:
+                self._last[session_id] = now
+        if engine is not None and _transcript_gone(engine):
+            # Deleted: stop serving it (a 404 below, as before the reuse; a
+            # moved transcript is simply found again).
+            with self._lock:
+                ours = self._engines.get(session_id) is engine  # not replaced meanwhile
+                if ours:
+                    del self._engines[session_id]
+                    self._last.pop(session_id, None)
+            if ours:
+                engine.stop()
+            engine = None
+        if engine is None:
+            # Only a session without a running engine is looked up: the page
+            # polls every 1.5 s, and a Codex lookup globs the sessions tree.
+            info = self.provider.find_session(session_id)
+            if info is None:
+                return None
+            with self._lock:
+                engine = self._engines.get(session_id)  # another request may have won
+                if engine is None:
+                    engine = Engine(info, self.config, self.pricing, enable_plan_limits=False)
+                    engine.start()
+                    self._engines[session_id] = engine
+                self._last[session_id] = now
         snap = engine.get_snapshot()
         if snap is not None and self.plan is not None:
             snap = dataclasses.replace(snap, plan_limits=self.plan.view)
@@ -226,6 +264,10 @@ def _card_context(snap: Snapshot) -> str:
 def _card_tokens(snap: Snapshot) -> str:
     s = snap.session
     c = s.cumulative
+    cost = (f"<div class=big style='color:#3fb950'>{esc(fmt_usd(s.cost.total_usd))}</div>"
+            f"<div class=dim>{esc(fmt_usd(s.cost.per_min_usd))}/min · {fmt_tokens(s.tokens_per_min)}/min</div>")
+    if s.agent == "codex":
+        return _card("Tokens & cost", cost + _codex_model_costs(s) + _kv(_codex_token_rows(s)))
     rows = [
         ("input", fmt_tokens(c.input)),
         ("cache read", fmt_tokens(c.cache_read)),
@@ -233,9 +275,30 @@ def _card_tokens(snap: Snapshot) -> str:
         ("output", fmt_tokens(c.output)),
         ("cache hit", fmt_pct(s.cache_hit_ratio)),
     ]
-    cost = (f"<div class=big style='color:#3fb950'>{esc(fmt_usd(s.cost.total_usd))}</div>"
-            f"<div class=dim>{esc(fmt_usd(s.cost.per_min_usd))}/min · {fmt_tokens(s.tokens_per_min)}/min</div>")
     return _card("Tokens & cost", cost + _kv(rows))
+
+
+def _codex_token_rows(s: SessionSnapshot) -> list[tuple[str, str]]:
+    # Codex: "input" is the non-cached part; reasoning is already inside output.
+    c = s.cumulative
+    rows = [("input", fmt_tokens(c.input)), ("cached", fmt_tokens(c.cache_read))]
+    if c.cache_creation > 0:
+        rows.append(("cache write", fmt_tokens(c.cache_creation)))
+    rows += [
+        ("output", fmt_tokens(c.output)),
+        ("reasoning", fmt_tokens(c.reasoning)),
+        ("cache hit", fmt_pct(s.cache_hit_ratio)),
+    ]
+    return rows
+
+
+def _codex_model_costs(s: SessionSnapshot) -> str:
+    # e.g. the main model plus the guardian reviewer (priced at the [gpt] fallback)
+    if len(s.cost.by_model) <= 1:
+        return ""
+    return "<div class=dim>" + " ".join(
+        f"{esc(short_model(m))}:{esc(fmt_usd(usd))}" for m, usd in s.cost.by_model[:3]
+    ) + "</div>"
 
 
 def _card_activity(snap: Snapshot) -> str:
@@ -292,6 +355,8 @@ def _card_plan(snap: Snapshot) -> str:
         return _card("Plan limits", "<div class=dim>disabled</div>")
     if not pl.available:
         return _card("Plan limits", f"<div class=dim>{esc(pl.error or 'unavailable')}</div>")
+    if snap.session.agent == "codex":
+        return _card_plan_codex(pl)
     rows = [
         ("5-hour", f"{esc(fmt_pct100(pl.five_hour_pct))} · resets {esc(reset_in(pl.five_hour_resets_at))}"),
         ("weekly", esc(fmt_pct100(pl.seven_day_pct))),
@@ -299,6 +364,36 @@ def _card_plan(snap: Snapshot) -> str:
         ("wk sonnet", esc(fmt_pct100(pl.seven_day_sonnet_pct))),
     ]
     return _card("Plan limits", _bar((pl.five_hour_pct or 0) / 100.0) + _kv(rows))
+
+
+def _plan_windows(pl: PlanLimitsView) -> list[tuple[str, float | None, _dt.datetime | None]]:
+    """Codex rate-limit windows that exist: ``(label, pct, resets_at)``."""
+    return [
+        (label, pct, resets)
+        for label, pct, resets in ((pl.five_hour_label, pl.five_hour_pct, pl.five_hour_resets_at),
+                                   (pl.seven_day_label, pl.seven_day_pct, pl.seven_day_resets_at))
+        if pct is not None or resets is not None
+    ]
+
+
+def _card_plan_codex(pl: PlanLimitsView) -> str:
+    # Codex limits come from local records: labelled windows, the plan and their age.
+    rows = []
+    pct = None  # the bar: the first window with a live percentage (5-hour slot first)
+    for label, window_pct, resets in _plan_windows(pl):
+        value, reset, live = limit_window(window_pct, resets)  # a passed reset: no stale %
+        rows.append((label, esc(value) + (f" · {esc(reset)}" if reset else "")))
+        pct = live if pct is None else pct
+    plan = " · ".join(x for x in (pl.plan_type, pl.note) if x)
+    if plan:
+        rows.append(("plan", esc(plan)))
+    if pl.as_of is not None:
+        age = (_dt.datetime.now(_dt.timezone.utc) - pl.as_of).total_seconds()
+        rows.append(("as of", f"{esc(pl.as_of.astimezone().strftime('%H:%M'))} "
+                              f"({esc(fmt_age(age))})"))
+    if not rows:
+        return _card("Plan limits", "<div class=dim>no limit data</div>")
+    return _card("Plan limits", (_bar(pct / 100.0) if pct is not None else "") + _kv(rows))
 
 
 def _card_events(snap: Snapshot) -> str:
@@ -324,33 +419,39 @@ def fragment_dashboard(snap: Snapshot | None) -> str:
     return _header(snap) + f"<div class=grid>{panels}</div>"
 
 
-def page_dashboard(session_id: str, snap: Snapshot | None) -> str:
-    title = f"pool-coder · {session_id[:8]}"
+def page_dashboard(session_id: str, snap: Snapshot | None, agent: str | None = None) -> str:
+    agent = agent or (snap.session.agent if snap is not None else "claude")
+    title = f"pool-coder · {short_id(session_id, agent)}"
     return _page(title, fragment_dashboard(snap), f"/partial/s/{urllib.parse.quote(session_id)}")
 
 
 def fragment_list(config: Config) -> str:
-    sessions = [s for s in list_sessions() if s.age_seconds() <= config.active_window_seconds][:40]
+    prov = get_provider(config.agent)
+    sessions = [s for s in prov.list_sessions()
+                if s.age_seconds() <= config.active_window_seconds][:40]
     if not sessions:
-        return "<div class=dim style='padding:20px'>No active sessions in the last 30 min.</div>"
+        agent = "" if prov is CLAUDE else f"{esc(prov.label)} "
+        return f"<div class=dim style='padding:20px'>No active {agent}sessions in the last 30 min.</div>"
     rows = []
     for info in sessions:
-        ov = peek_session(info, config)
+        ov = prov.peek_session(info, config)
         dot = "<span class='badge live'>●</span>" if ov.is_live else "<span class=dim>○</span>"
         rows.append(
             f"<a class=row href='/s/{urllib.parse.quote(info.session_id)}'>{dot}"
             f"<span class=dim>{esc(fmt_age(info.age_seconds()))}</span>"
             f"<span class=pct>{esc(fmt_pct(ov.occupancy))}</span>"
             f"<span class=name>{esc(ov.label)}</span>"
-            f"<span class=last>{esc((ov.last_text or '')[:60])}</span></a>"
+            f"<span class=last>{esc(ov.last_shown[:60])}</span></a>"
         )
     return ("<div class='topbar hdr'><div class=r1><span class=proj>pool-coder</span>"
-            "<span class=dim>active Claude Code sessions — tap to monitor</span></div></div>"
+            f"<span class=dim>active {esc(prov.label)} sessions — tap to monitor</span></div></div>"
             f"<div class=list style='margin-top:10px'>{''.join(rows)}</div>")
 
 
 def page_list(config: Config) -> str:
-    return _page("pool-coder", fragment_list(config), "/partial/list", ms=3000)
+    prov = get_provider(config.agent)
+    title = "pool-coder" if prov is CLAUDE else f"pool-coder · {prov.label}"
+    return _page(title, fragment_list(config), "/partial/list", ms=3000)
 
 
 def snapshot_json(snap: Snapshot | None) -> str:
@@ -407,7 +508,7 @@ def _make_handler(manager: EngineManager, default_sid: str | None):
                                code=200 if snap is not None else 404)
                 elif path.startswith("/s/"):
                     sid = urllib.parse.unquote(path[len("/s/"):])
-                    self._send(page_dashboard(sid, manager.snapshot(sid)))
+                    self._send(page_dashboard(sid, manager.snapshot(sid), manager.provider.name))
                 else:
                     self._send("not found", "text/plain; charset=utf-8", 404)
             except (BrokenPipeError, ConnectionResetError):
@@ -441,7 +542,8 @@ def serve(host: str, port: int, config: Config, pricing: Pricing,
     httpd = ThreadingHTTPServer((host, port), _make_handler(manager, session))
     httpd.daemon_threads = True
 
-    print("pool-coder — web dashboard")
+    agent = "" if manager.provider is CLAUDE else f" ({manager.provider.label})"
+    print(f"pool-coder — web dashboard{agent}")
     print(f"  local : http://127.0.0.1:{port}/")
     if host in ("0.0.0.0", "::"):
         ip = _lan_ip()

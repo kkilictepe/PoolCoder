@@ -10,17 +10,17 @@ the update:
 
 Keyed facts use dict upserts so replay-after-rotation is a no-op; the only
 summed quantity (tokens) lives in a per-turn map that ``reset_source`` clears
-before a replay.
+before a replay. The token/context bookkeeping itself lives on
+``SessionState`` (shared with the Codex fold).
 """
 
 from __future__ import annotations
 
 import re
 
-from .config import COMPACTION_DROP_FRACTION, Config
+from .config import Config
 from .parser import Record, content_preview
 from .state import (
-    CompactionEvent,
     SessionState,
     SubagentStatus,
     ToolStatus,
@@ -120,10 +120,7 @@ class Aggregator:
         ts = record.timestamp
         usage = record.usage()
         if usage is not None:
-            gkey = (source_id, record.token_key)
-            self.state.tokens_by_key[gkey] = usage
-            self.state.key_model[gkey] = record.model
-            self.state.keys_by_source.setdefault(source_id, set()).add(record.token_key)
+            self.state.record_usage(source_id, record.token_key, usage, record.model)
 
         if kind == "main":
             self.state.turns += 1
@@ -136,7 +133,7 @@ class Aggregator:
             if record.version:
                 self.state.version = record.version
             if usage is not None:
-                self._update_context(usage, ts)
+                self.state.update_context(usage, ts)
             # surface what Claude is reasoning about / saying this turn
             thinking = record.thinking_len()
             if thinking:
@@ -163,21 +160,6 @@ class Aggregator:
                 sub.open_tools.add(tu.id)
                 sub.last_tool = tu.name
         # wfagent: tokens already folded above; nothing else tracked per-turn.
-
-    def _update_context(self, usage, ts) -> None:
-        ctx = usage.context_tokens
-        prev = self.state.current_context_tokens
-        if prev > 0 and ctx < prev * COMPACTION_DROP_FRACTION:
-            self.state.compactions.append(CompactionEvent(at=ts, before=prev, after=ctx))
-            self.state.push_event(ts, "compaction", f"⟳ context compacted {prev:,} → {ctx:,}")
-        self.state.prev_context_tokens = prev
-        self.state.current_context_tokens = ctx
-        self.state.max_context_tokens = max(self.state.max_context_tokens, ctx)
-        self.state.latest_usage = usage
-        hist = self.state.context_history
-        hist.append(ctx)
-        if len(hist) > 600:
-            del hist[: len(hist) - 600]
 
     # -- user / tool results ---------------------------------------------
     def _apply_user(self, source_id: str, kind: str, ident: str, record: Record) -> None:
@@ -231,26 +213,11 @@ class Aggregator:
 
     # -- reset (rotation/truncation) -------------------------------------
     def reset_source(self, source_id: str) -> None:
-        for token_key in self.state.keys_by_source.pop(source_id, set()):
-            gkey = (source_id, token_key)
-            self.state.tokens_by_key.pop(gkey, None)
-            self.state.key_model.pop(gkey, None)
+        self.state.drop_source_tokens(source_id)
 
         kind, ident = _scope(source_id)
         if kind == "main":
-            s = self.state
-            s.turns = 0
-            s.user_messages = 0
-            s.tool_counts = {}
-            s.tool_errors = 0
-            s.tools = {}
-            s.files_touched = {}
-            s.current_context_tokens = 0
-            s.prev_context_tokens = 0
-            s.max_context_tokens = 0
-            s.context_history = []
-            s.compactions = []
-            s.events.clear()
+            self.state.reset_main()
         elif kind == "agent":
             sub = self.state.subagents.get(ident)
             if sub is not None:

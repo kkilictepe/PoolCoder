@@ -15,7 +15,8 @@ class UsageTokens:
 
     ``context_tokens`` is the prompt side (what fills the model's context
     window for that turn); ``output`` is the response and is excluded from
-    occupancy but included in billing.
+    occupancy but included in billing. ``reasoning`` (Codex) is the part of
+    ``output`` spent reasoning: shown only, never billed or counted twice.
     """
 
     input: int = 0
@@ -24,6 +25,7 @@ class UsageTokens:
     output: int = 0
     web_search: int = 0
     web_fetch: int = 0
+    reasoning: int = 0
     service_tier: str | None = None
 
     @property
@@ -51,6 +53,7 @@ class UsageTokens:
             output=self.output + other.output,
             web_search=self.web_search + other.web_search,
             web_fetch=self.web_fetch + other.web_fetch,
+            reasoning=self.reasoning + other.reasoning,
             service_tier=other.service_tier or self.service_tier,
         )
 

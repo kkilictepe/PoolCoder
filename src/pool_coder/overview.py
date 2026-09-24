@@ -25,6 +25,14 @@ class SessionOverview:
     occupancy: float
     last_text: str | None
     is_live: bool
+    last_is_title: bool = False  # Codex: last_text is the thread's name, not a prompt
+
+    @property
+    def last_shown(self) -> str:
+        """``last_text`` as the lists show it: a thread name in brackets, so it
+        never reads as the last prompt."""
+        text = self.last_text or ""
+        return f"[{text}]" if text and self.last_is_title else text
 
     @property
     def label(self) -> str:

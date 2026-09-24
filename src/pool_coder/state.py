@@ -4,6 +4,10 @@ Owned exclusively by the reader thread. The UI never touches this — it reads
 immutable snapshots built from it (see ``snapshot.py``). Token totals are kept
 as a per-turn map (single source of truth) and summed lazily, which keeps
 replay-after-rotation correct without running counters to unwind.
+
+The mutators shared by every agent's fold (``record_usage``, ``drop_usage``,
+``drop_source_tokens``, ``reset_main``, ``update_context``) live here so the
+Claude and Codex aggregators apply identical bookkeeping.
 """
 
 from __future__ import annotations
@@ -12,10 +16,11 @@ from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
 
+from .config import AUTO_COMPACT_FRACTION, COMPACTION_DROP_FRACTION
 from .models import EMPTY_USAGE, ToolUse, UsageTokens
 
 EVENT_LOG_MAX = 400
-CONTEXT_HISTORY_MAX = 500
+CONTEXT_HISTORY_MAX = 600  # per-turn context samples kept for the sparkline
 
 
 @dataclass
@@ -130,6 +135,75 @@ class SessionState:
     subagents: dict[str, SubagentStatus] = field(default_factory=dict)
     workflows: dict[str, WorkflowStatus] = field(default_factory=dict)
 
+    # which agent wrote the transcript ("claude" | "codex")
+    agent: str = "claude"
+    # window the transcript itself reports (0 = unknown -> Config.window_for)
+    context_window: int = 0
+    auto_compact_fraction: float = AUTO_COMPACT_FRACTION
+
+    # ---- token folding ---------------------------------------------------
+    def record_usage(self, source_id: str, key: str, usage: UsageTokens,
+                     model: str | None) -> None:
+        """Upsert one response's usage (replaying the same key is a no-op)."""
+        gkey = (source_id, key)
+        self.tokens_by_key[gkey] = usage
+        self.key_model[gkey] = model
+        self.keys_by_source.setdefault(source_id, set()).add(key)
+
+    def drop_usage(self, source_id: str, key: str) -> None:
+        """Forget one key of a source (e.g. a superseded fallback count)."""
+        gkey = (source_id, key)
+        self.tokens_by_key.pop(gkey, None)
+        self.key_model.pop(gkey, None)
+        keys = self.keys_by_source.get(source_id)
+        if keys is not None:
+            keys.discard(key)
+            if not keys:
+                del self.keys_by_source[source_id]
+
+    def drop_source_tokens(self, source_id: str) -> None:
+        """Forget every key of a source (before it is replayed from scratch)."""
+        for token_key in self.keys_by_source.pop(source_id, set()):
+            gkey = (source_id, token_key)
+            self.tokens_by_key.pop(gkey, None)
+            self.key_model.pop(gkey, None)
+
+    def reset_main(self) -> None:
+        """Clear what the main transcript accumulated, ahead of a replay."""
+        self.turns = 0
+        self.user_messages = 0
+        self.tool_counts = {}
+        self.tool_errors = 0
+        self.tools = {}
+        self.files_touched = {}
+        self.current_context_tokens = 0
+        self.prev_context_tokens = 0
+        self.max_context_tokens = 0
+        self.context_history = []
+        self.compactions = []
+        self.events.clear()
+
+    def update_context(self, usage: UsageTokens, ts: datetime | None,
+                       detect_drop: bool = True) -> None:
+        """Record the latest turn's prompt size as the live context occupancy.
+
+        With ``detect_drop`` a sharp fall is logged as a compaction; agents
+        that write an explicit compaction marker pass ``False``.
+        """
+        ctx = usage.context_tokens
+        prev = self.current_context_tokens
+        if detect_drop and prev > 0 and ctx < prev * COMPACTION_DROP_FRACTION:
+            self.compactions.append(CompactionEvent(at=ts, before=prev, after=ctx))
+            self.push_event(ts, "compaction", f"⟳ context compacted {prev:,} → {ctx:,}")
+        self.prev_context_tokens = prev
+        self.current_context_tokens = ctx
+        self.max_context_tokens = max(self.max_context_tokens, ctx)
+        self.latest_usage = usage
+        hist = self.context_history
+        hist.append(ctx)
+        if len(hist) > CONTEXT_HISTORY_MAX:
+            del hist[: len(hist) - CONTEXT_HISTORY_MAX]
+
     # ---- computed views (read by the snapshot builder) -----------------
     def cumulative_tokens(self) -> UsageTokens:
         total = EMPTY_USAGE
@@ -143,6 +217,14 @@ class SessionState:
             if src == source_id:
                 total = total + usage
         return total
+
+    def source_billable_totals(self) -> dict[str, int]:
+        """Billable tokens per source in one pass (``source_tokens`` per agent
+        would rescan every key once per sub-agent)."""
+        out: dict[str, int] = {}
+        for (src, _key), usage in self.tokens_by_key.items():
+            out[src] = out.get(src, 0) + usage.billable_total
+        return out
 
     def model_breakdown(self) -> dict[str, UsageTokens]:
         out: dict[str, UsageTokens] = {}
