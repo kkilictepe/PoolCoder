@@ -9,7 +9,7 @@ from pool_coder.aggregator import Aggregator
 from pool_coder.config import Config
 from pool_coder.parser import Record
 from pool_coder.pricing import Pricing
-from pool_coder.snapshot import PlanLimitsView, Snapshot, build_session_snapshot
+from pool_coder.snapshot import EventView, PlanLimitsView, Snapshot, build_session_snapshot
 from pool_coder.state import SessionState
 
 
@@ -67,6 +67,7 @@ def test_snapshot_json_roundtrips():
 # ``codex_home`` fixture (never the real ~/.codex).
 import dataclasses  # noqa: E402
 import json  # noqa: E402
+import os  # noqa: E402
 import threading  # noqa: E402
 import time  # noqa: E402
 import urllib.error  # noqa: E402
@@ -137,6 +138,60 @@ def _codex_snapshot(with_data: bool = True, *, plan: PlanLimitsView | None = Non
     session = build_session_snapshot(state, Config(agent="codex"), Pricing.load(),
                                      now=datetime(2026, 9, 22, 21, 0, tzinfo=timezone.utc))
     return Snapshot(generated_at=datetime.now(timezone.utc), session=session, plan_limits=plan)
+
+
+def _multi_snapshot(sid: str, label: str, offset: int = 0, count: int = 60) -> Snapshot:
+    base = _snapshot()
+    start = datetime(2026, 6, 20, 10, 0, tzinfo=timezone.utc)
+    events = tuple(
+        EventView(start + timedelta(seconds=(i * 2) + offset), "text", f"{label}-{i:03d}")
+        for i in range(count)
+    )
+    session = dataclasses.replace(
+        base.session, session_id=sid, cwd=f"C:/work/{label}", title=label,
+        events=events, agent="claude",
+    )
+    return dataclasses.replace(base, session=session)
+
+
+def test_multi_fragment_has_full_columns_and_one_tabbed_activity_card():
+    alpha = _multi_snapshot("alpha-session", "Alpha <x>")
+    beta = _multi_snapshot("beta-session", "Beta", offset=1)
+    frag = web.fragment_all([alpha, beta], Config())
+
+    assert frag.count("class=session-column") == 2
+    for title in ("Context window", "Tokens &amp; cost", "Subagents", "Workflows", "Plan limits"):
+        assert frag.count(title) == 2
+    assert frag.count("Recent activity") == 1
+    assert frag.count("role=tab ") == 3  # All + one tab per session
+    assert "data-tab-key=all" in frag and "data-tab-key='alpha-session'" in frag
+    assert "Alpha <x>" not in frag and "Alpha &lt;x&gt; · alpha-se" in frag
+
+    # Each session contributes only its newest 50 rows, once in All and once
+    # in its own tab. The merged All feed keeps timestamp order.
+    assert "Alpha &lt;x&gt; · alpha-se" in frag
+    assert "Alpha &lt;x&gt;-009" not in frag and frag.count("Alpha &lt;x&gt;-010") == 2
+    assert frag.count("Alpha &lt;x&gt;-059") == 2 and frag.count("Beta-059") == 2
+    assert (frag.index("Alpha &lt;x&gt;-010") < frag.index("Beta-010")
+            < frag.index("Alpha &lt;x&gt;-011"))
+
+
+def test_multi_page_persists_visibility_and_poll_state_in_the_browser():
+    snap = _multi_snapshot("alpha-session", "Alpha")
+    page = web.page_all([snap], Config())
+    assert "<title>pool-coder · all Claude Code sessions</title>" in page
+    assert "/partial/all" in page and "multi-wrap" in page
+    assert 'pool-coder:hidden:claude' in page and "localStorage" in page
+    assert "data-action=hide" in page and "data-action=show-all" in page
+    assert "scrollLeft" in page and "activeTab" in page
+    assert "[hidden]{display:none!important;}" in page
+
+
+def test_multi_fragment_empty_state_is_pollable_and_recoverable():
+    frag = web.fragment_all([], Config(agent="codex"))
+    assert "all active Codex sessions · 0 matched" in frag
+    assert "No sessions in the configured active window" in frag
+    assert "Recent activity" in frag and "data-tab-key=all" in frag
 
 
 _CODEX_PLANS = {
@@ -249,6 +304,7 @@ def test_codex_fragment_list(codex_home):
     cfg = Config(agent="codex")
     frag = web.fragment_list(cfg)
     assert "active Codex sessions — tap to monitor" in frag
+    assert "href='/all'>Monitor all</a>" in frag
     assert f"href='/s/{cr.ROOT}'" in frag
     assert cr.CHILD not in frag          # sub-agent threads are rolled up, not listed
     assert "rootproj" in frag and "fix the flaky test" in frag
@@ -267,7 +323,9 @@ def test_codex_list_marks_a_thread_name_standing_in_for_the_prompt(monkeypatch):
 
 
 def test_codex_fragment_list_empty(codex_home):
-    assert "No active Codex sessions in the last 30 min." in web.fragment_list(Config(agent="codex"))
+    frag = web.fragment_list(Config(agent="codex"))
+    assert "No active Codex sessions in the last 30 min." in frag
+    assert "href='/all'>Monitor all</a>" in frag
 
 
 def test_claude_fragment_list_text_unchanged(monkeypatch):
@@ -325,6 +383,84 @@ def test_engine_manager_reuses_an_engine_before_looking_up(codex_home):
             assert manager.snapshot(cr.ROOT) is not None
         assert lookups == [cr.ROOT]
         assert len(manager._engines) == 1
+    finally:
+        manager.stop_all()
+
+
+def test_engine_manager_active_batch_has_no_cap_reuses_and_evicts(monkeypatch):
+    now = datetime.now(timezone.utc)
+    active = [
+        SessionInfo(Path(f"s{i}.jsonl"), f"session-{i}", f"project-{i}",
+                    now - timedelta(seconds=i), i)
+        for i in range(10)
+    ]
+    stale = SessionInfo(Path("stale.jsonl"), "stale", "old", now - timedelta(hours=2), 1)
+    created: list[FakeEngine] = []
+
+    class FakeEngine:
+        def __init__(self, info, config, pricing, enable_plan_limits=False):
+            self.state = type("FakeState", (), {"main_path": str(info.main_path)})()
+            base = _snapshot()
+            session = dataclasses.replace(base.session, session_id=info.session_id,
+                                          project_hash=info.project_hash)
+            self.snap = dataclasses.replace(base, session=session)
+            self.started = False
+            self.stopped = False
+            created.append(self)
+
+        def start(self):
+            self.started = True
+
+        def stop(self):
+            self.stopped = True
+
+        def get_snapshot(self):
+            return self.snap
+
+    class FakePlan:
+        view = PlanLimitsView(available=False, error="shared")
+        stopped = False
+
+        def stop(self):
+            self.stopped = True
+
+    monkeypatch.setattr(web, "Engine", FakeEngine)
+    monkeypatch.setattr(web, "_transcript_gone", lambda engine: False)
+    manager = web.EngineManager(Config(), Pricing.load(), enable_plan_limits=False,
+                                max_engines=2, idle_ttl=0)
+    manager.plan = FakePlan()
+    manager.provider = dataclasses.replace(
+        CLAUDE, list_sessions=lambda: [stale, *reversed(active)])
+    try:
+        snaps = manager.active_snapshots()
+        assert [snap.session.session_id for snap in snaps] == [f"session-{i}" for i in range(10)]
+        assert len(manager._engines) == 10 and len(created) == 10
+        assert all(engine.started and not engine.stopped for engine in created)
+        assert all(snap.plan_limits.error == "shared" for snap in snaps)
+
+        # Later activity changes do not reshuffle existing columns. A newly
+        # discovered session appends even when it is the most recently active.
+        reranked = [dataclasses.replace(info, mtime=now + timedelta(seconds=i))
+                    for i, info in enumerate(active)]
+        newest = SessionInfo(Path("new.jsonl"), "session-new", "new-project",
+                             now + timedelta(minutes=1), 1)
+        manager.provider = dataclasses.replace(
+            manager.provider, list_sessions=lambda: [newest, *reversed(reranked)])
+        snaps = manager.active_snapshots()
+        assert [snap.session.session_id for snap in snaps] == [
+            *(f"session-{i}" for i in range(10)), "session-new"]
+        assert len(created) == 11
+
+        # A third batch reuses every engine despite the ordinary cap of two.
+        manager.active_snapshots()
+        assert len(created) == 11
+
+        # Once the batch no longer protects those ids, normal idle eviction applies.
+        manager.provider = dataclasses.replace(manager.provider, list_sessions=lambda: [])
+        for sid in manager._last:
+            manager._last[sid] -= 1
+        assert manager.active_snapshots() == []
+        assert manager._engines == {} and all(engine.stopped for engine in created)
     finally:
         manager.stop_all()
 
@@ -454,7 +590,13 @@ def test_codex_http_endpoints(codex_server):
     code, body = _get(f"{base}/")
     assert code == 200 and "active Codex sessions" in body
     code, body = _get(f"{base}/partial/list")
-    assert code == 200 and f"/s/{cr.ROOT}" in body
+    assert code == 200 and f"/s/{cr.ROOT}" in body and "href='/all'" in body
+    code, body = _get(f"{base}/all")
+    assert code == 200 and "all Codex sessions</title>" in body
+    assert "/partial/all" in body and f"data-session-id='{cr.ROOT}'" in body
+    code, body = _get(f"{base}/partial/all")
+    assert code == 200 and "all active Codex sessions" in body
+    assert body.count("class=session-column") == 1
     code, body = _get(f"{base}/s/{cr.ROOT}")
     assert code == 200 and f"<title>pool-coder · {cr.ROOT[-8:]}</title>" in body
     _loaded(manager, cr.ROOT)
@@ -466,3 +608,23 @@ def test_codex_http_endpoints(codex_server):
     assert data["session"]["cumulative"]["reasoning"] == 3_500
     code, _ = _get(f"{base}/partial/s/no-such-thread")
     assert code == 404
+
+
+def test_all_endpoint_discovers_and_drops_sessions(codex_server, codex_home):
+    base, _manager = codex_server
+    other = "02b1dbef-e837-4df3-bc04-29ddddedccfd"
+    path = cr.write_rollout(
+        codex_home, other,
+        [cr.session_meta(other, cwd="C:\\Git\\new-project"),
+         cr.turn_context("gpt-5.6-terra", cwd="C:\\Git\\new-project")],
+        local_ts="2026-09-22T23-59-59",
+    )
+    code, body = _get(f"{base}/partial/all")
+    assert code == 200 and f"data-session-id='{other}'" in body
+    assert body.count("class=session-column") == 2
+
+    old = time.time() - 7200
+    os.utime(path, (old, old))
+    code, body = _get(f"{base}/partial/all")
+    assert code == 200 and f"data-session-id='{other}'" not in body
+    assert body.count("class=session-column") == 1

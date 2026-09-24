@@ -79,8 +79,17 @@ uv run pool-coder --serve     # prints a phone URL like http://192.168.1.x:8765/
 
 Open that URL on any device on the **same Wi-Fi**. You get a responsive HTML
 dashboard (same metrics as the TUI) that auto-refreshes: `/` lists active
-sessions (Codex ones with `--codex`), tap one to monitor it, and there's a JSON
-feed at `/api/s/<id>`. Pin a single session with `--session <id>`. It's
+sessions (Codex ones with `--codex`), tap one to monitor it, or choose
+**Monitor all** to open `/all`. The all-sessions view puts each matching
+session in a horizontally scrollable column; existing columns keep their
+positions as activity changes, and new sessions append to the right. It
+combines recent activity into an **All** tab plus one tab per session. Hide
+buttons remove uninteresting sessions from both areas and remember that choice
+in the browser. The normal
+window is the last 30 minutes; starting the server with `--all` expands this
+view to all available sessions. A per-session JSON feed remains available at
+`/api/s/<id>`. Pin a single session with `--session <id>` (the direct `/all`
+URL still works). It's
 **read-only and unauthenticated** — only expose it on a network you trust (use
 `--host 127.0.0.1` to keep it local).
 
