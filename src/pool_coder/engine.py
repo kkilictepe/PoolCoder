@@ -4,21 +4,21 @@ The reader thread is the *only* thing that touches the mutable ``SessionState``.
 It publishes immutable ``Snapshot``s under a lock; the UI calls
 ``get_snapshot()`` and never sees partial state. This is the entire core->UI
 contract (plus ``pricing``, which is pure).
+
+Which fold, transcript source and plan-limit source a session gets comes from
+its agent's provider (``config.agent``: Claude Code by default, or Codex).
 """
 
 from __future__ import annotations
 
 import threading
 from datetime import datetime, timezone
-from pathlib import Path
 
-from .aggregator import Aggregator
 from .config import Config, TAIL_INTERVAL
 from .paths import SessionInfo
 from .pricing import Pricing
+from .providers import get_provider
 from .snapshot import Snapshot, build_session_snapshot
-from .sources.jsonl_source import JsonlSource
-from .sources.plan_limits import PlanLimitsSource
 from .state import SessionState
 
 
@@ -32,9 +32,10 @@ class Engine:
             project_hash=session.project_hash,
             main_path=str(session.main_path),
         )
-        self.agg = Aggregator(self.state, self.config)
-        self.jsonl = JsonlSource(session.main_path, self.agg)
-        self.plan = PlanLimitsSource() if (enable_plan_limits and self.config.plan_limits) else None
+        self.provider = get_provider(self.config.agent)
+        self.agg, self.jsonl = self.provider.open_session(self.state, self.config)
+        self.plan = (self.provider.make_plan_source()
+                     if (enable_plan_limits and self.config.plan_limits) else None)
 
         self._lock = threading.Lock()
         self._snapshot: Snapshot | None = None

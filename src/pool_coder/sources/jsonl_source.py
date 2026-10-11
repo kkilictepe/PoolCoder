@@ -1,28 +1,35 @@
 """Session-transcript source: discovery + tailers feeding the aggregator.
 
-Owns one ``SessionDiscovery`` and a list of ``Tailer``s (one per file). On
-attach it registers subagent/workflow side-data; on poll it drains each tailer
-into the aggregator, translating the ``RESET`` sentinel into a source reset.
+Owns one discovery object and a list of ``Tailer``s (one per file). On attach
+it registers subagent/workflow side-data; on poll it drains each tailer into
+the fold target, translating the ``RESET`` sentinel into a source reset.
+
+The defaults (``SessionDiscovery`` + ``parse_line``) are Claude Code's; another
+agent passes its own ``discovery=`` and ``parse=`` and reuses the drain loop.
 """
 
 from __future__ import annotations
 
 import time
 from pathlib import Path
+from typing import Callable
 
-from ..aggregator import Aggregator
 from ..config import DISCOVERY_INTERVAL
 from ..discovery import DiscoveryDelta, SessionDiscovery
 from ..parser import parse_line
 from ..tailer import RESET, Tailer
+from .base import Discoverer, FoldTarget
 
 
 class JsonlSource:
-    def __init__(self, main_path: str | Path, aggregator: Aggregator,
-                 discovery_interval: float = DISCOVERY_INTERVAL):
+    def __init__(self, main_path: str | Path, aggregator: FoldTarget,
+                 discovery_interval: float = DISCOVERY_INTERVAL, *,
+                 discovery: Discoverer | None = None,
+                 parse: Callable[[str], object] = parse_line):
         self.main_path = Path(main_path)
         self.agg = aggregator
-        self.discovery = SessionDiscovery(self.main_path)
+        self.discovery = discovery if discovery is not None else SessionDiscovery(self.main_path)
+        self.parse = parse  # line -> record (None skips the line)
         self.tailers: list[tuple[str, Tailer]] = []
         self.discovery_interval = discovery_interval
         self._last_discovery = 0.0
@@ -51,7 +58,7 @@ class JsonlSource:
                 if item is RESET:
                     self.agg.reset_source(source_id)
                 else:
-                    rec = parse_line(item)
+                    rec = self.parse(item)
                     if rec is not None:
                         self.agg.apply(source_id, rec)
             if tailer.has_backlog:

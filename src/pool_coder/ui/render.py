@@ -1,13 +1,22 @@
-"""Pure snapshot -> Rich renderable functions (no Textual, easily testable)."""
+"""Pure snapshot -> Rich renderable functions (no Textual, easily testable).
+
+Claude and Codex share every panel. Only two differ for Codex
+(``snap.session.agent == "codex"``): the tokens panel (Codex counts cached
+tokens inside input and reports reasoning) and the plan panel (limits read
+from local records: labelled windows, a plan note and their age).
+"""
 
 from __future__ import annotations
+
+from datetime import datetime
 
 from rich.console import Group
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-from ..format import (
+from ..format import (  # noqa: F401 (as_of_text is part of this module's surface)
+    as_of_text,
     fmt_age,
     fmt_clock,
     fmt_duration,
@@ -16,9 +25,12 @@ from ..format import (
     fmt_pct100,
     fmt_tokens,
     fmt_usd,
+    limit_window,
     reset_in,
+    short_id,
+    short_model,
 )
-from ..snapshot import Snapshot
+from ..snapshot import PlanLimitsView, Snapshot
 
 _KIND_STYLE = {
     "tool": "cyan",
@@ -65,7 +77,7 @@ def header_bar(snap: Snapshot) -> Panel:
     t.append(f"   {fmt_duration(s.duration_s)} · {s.turns} turns", style="grey62")
     sub = Text(f"» {s.last_prompt}" if s.last_prompt else "(no prompt yet)",
                style="italic grey74", overflow="ellipsis", no_wrap=True)
-    return Panel(Group(t, sub), title=f"pool-coder · {s.session_id[:8]}",
+    return Panel(Group(t, sub), title=f"pool-coder · {short_id(s.session_id, s.agent)}",
                  border_style="blue", padding=(0, 1))
 
 
@@ -92,10 +104,19 @@ def panel_tokens(snap: Snapshot) -> Panel:
     s = snap.session
     c = s.cumulative
     kv = _kv()
-    kv.add_row("input", fmt_tokens(c.input))
-    kv.add_row("cache read", fmt_tokens(c.cache_read))
-    kv.add_row("cache write", fmt_tokens(c.cache_creation))
-    kv.add_row("output", fmt_tokens(c.output))
+    if s.agent == "codex":
+        # "input" is the non-cached part; reasoning is already inside output.
+        kv.add_row("input", fmt_tokens(c.input))
+        kv.add_row("cached", fmt_tokens(c.cache_read))
+        if c.cache_creation > 0:
+            kv.add_row("cache write", fmt_tokens(c.cache_creation))
+        kv.add_row("output", fmt_tokens(c.output))
+        kv.add_row("reasoning", fmt_tokens(c.reasoning))
+    else:
+        kv.add_row("input", fmt_tokens(c.input))
+        kv.add_row("cache read", fmt_tokens(c.cache_read))
+        kv.add_row("cache write", fmt_tokens(c.cache_creation))
+        kv.add_row("output", fmt_tokens(c.output))
     kv.add_row("cache hit", fmt_pct(s.cache_hit_ratio))
     cost = Text()
     cost.append(fmt_usd(s.cost.total_usd), style="bold green")
@@ -105,7 +126,7 @@ def panel_tokens(snap: Snapshot) -> Panel:
     if s.cost.by_model and len(s.cost.by_model) > 1:
         models = Text(overflow="ellipsis", no_wrap=True)
         for m, c2 in s.cost.by_model[:3]:
-            models.append(f"{m.split('-')[1] if '-' in m else m}:{fmt_usd(c2)} ", style="grey62")
+            models.append(f"{short_model(m, s.agent)}:{fmt_usd(c2)} ", style="grey62")
         body.append(models)
     if s.web_search or s.web_fetch:
         body.append(Text(f"web: {s.web_search} search · {s.web_fetch} fetch", style="grey62"))
@@ -153,9 +174,14 @@ def panel_subagents(snap: Snapshot) -> Panel:
     t.add_column(style="bold", no_wrap=True)
     t.add_column(justify="right", style="grey62", no_wrap=True)
     t.add_column(overflow="ellipsis", no_wrap=True)
+    codex = s.agent == "codex"
     for sub in s.subagents[:10]:
         mark = Text("▶", style="yellow") if sub.running else Text("✓", style="green")
-        t.add_row(mark, sub.agent_type, fmt_tokens(sub.tokens), sub.description)
+        if codex:
+            # Codex names come from agent paths / nicknames: never parse them as markup.
+            t.add_row(mark, Text(sub.agent_type), fmt_tokens(sub.tokens), Text(sub.description))
+        else:
+            t.add_row(mark, sub.agent_type, fmt_tokens(sub.tokens), sub.description)
     title = f"Subagents · {s.subagents_running} running / {len(s.subagents)}"
     return Panel(t, title=title, border_style="blue", padding=(0, 1))
 
@@ -189,6 +215,8 @@ def panel_plan(snap: Snapshot) -> Panel:
     if not pl.available:
         return Panel(Text(pl.error or "unavailable", style="grey50"),
                      title="Plan limits", border_style="grey37", padding=(0, 1))
+    if snap.session.agent == "codex":
+        return _panel_plan_codex(pl)
     kv = _kv()
     kv.add_row("5-hour", f"{fmt_pct100(pl.five_hour_pct)}   resets {reset_in(pl.five_hour_resets_at)}")
     kv.add_row("weekly", fmt_pct100(pl.seven_day_pct))
@@ -197,6 +225,36 @@ def panel_plan(snap: Snapshot) -> Panel:
     body = [bar((pl.five_hour_pct or 0) / 100.0, 34), kv]
     if pl.extra_enabled:
         body.append(Text(f"extra usage: {fmt_pct100(pl.extra_pct)}", style="grey62"))
+    return Panel(Group(*body), title="Plan limits", border_style="blue", padding=(0, 1))
+
+
+def plan_windows(pl: PlanLimitsView) -> list[tuple[str, float | None, datetime | None]]:
+    """Codex rate-limit windows that exist: ``(label, pct, resets_at)``."""
+    return [
+        (label, pct, resets)
+        for label, pct, resets in ((pl.five_hour_label, pl.five_hour_pct, pl.five_hour_resets_at),
+                                   (pl.seven_day_label, pl.seven_day_pct, pl.seven_day_resets_at))
+        if pct is not None or resets is not None
+    ]
+
+
+def _panel_plan_codex(pl: PlanLimitsView) -> Panel:
+    kv = _kv()
+    pct = None  # the bar: the first window with a live percentage (5-hour slot first)
+    for label, window_pct, resets in plan_windows(pl):
+        value, reset, live = limit_window(window_pct, resets)
+        kv.add_row(Text(label), Text(value + (f"   {reset}" if reset else "")))  # never markup
+        pct = live if pct is None else pct
+    plan = " · ".join(x for x in (pl.plan_type, pl.note) if x)
+    if plan:
+        kv.add_row("plan", Text(plan))
+    as_of = as_of_text(pl.as_of)
+    if as_of:
+        kv.add_row("as of", as_of)
+    body: list = []
+    if pct is not None:
+        body.append(bar(pct / 100.0, 34))
+    body.append(kv if kv.row_count else Text("no limit data", style="grey50"))
     return Panel(Group(*body), title="Plan limits", border_style="blue", padding=(0, 1))
 
 
