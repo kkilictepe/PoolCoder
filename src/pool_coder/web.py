@@ -295,9 +295,9 @@ def _card_plan(snap: Snapshot) -> str:
     rows = [
         ("5-hour", f"{esc(fmt_pct100(pl.five_hour_pct))} · resets {esc(reset_in(pl.five_hour_resets_at))}"),
         ("weekly", esc(fmt_pct100(pl.seven_day_pct))),
-        ("wk opus", esc(fmt_pct100(pl.seven_day_opus_pct))),
-        ("wk sonnet", esc(fmt_pct100(pl.seven_day_sonnet_pct))),
     ]
+    rows += [(f"wk {esc(label.lower())}", esc(fmt_pct100(pct)))
+             for label, pct in pl.weekly_scoped]
     return _card("Plan limits", _bar((pl.five_hour_pct or 0) / 100.0) + _kv(rows))
 
 

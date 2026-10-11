@@ -74,9 +74,9 @@ class PlanLimitsView:
     five_hour_pct: float | None = None
     five_hour_resets_at: datetime | None = None
     seven_day_pct: float | None = None
-    seven_day_opus_pct: float | None = None
-    seven_day_sonnet_pct: float | None = None
     seven_day_resets_at: datetime | None = None
+    # Model/surface-scoped weekly limits as (label, pct) pairs, e.g. ("Fable", 42.0)
+    weekly_scoped: tuple[tuple[str, float], ...] = ()
     extra_enabled: bool = False
     extra_pct: float | None = None
 

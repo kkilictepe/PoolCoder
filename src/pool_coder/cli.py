@@ -136,9 +136,10 @@ def format_snapshot_human(snap) -> str:
         pl = snap.plan_limits
         lines.append("")
         if pl.available:
+            scoped = "".join(f"   {label.lower()} {fmt_pct100(pct)}"
+                             for label, pct in pl.weekly_scoped)
             lines.append(f"  PLAN      5h {fmt_pct100(pl.five_hour_pct)} (resets {reset_in(pl.five_hour_resets_at)})   "
-                         f"7d {fmt_pct100(pl.seven_day_pct)}   opus {fmt_pct100(pl.seven_day_opus_pct)}   "
-                         f"sonnet {fmt_pct100(pl.seven_day_sonnet_pct)}")
+                         f"7d {fmt_pct100(pl.seven_day_pct)}{scoped}")
         else:
             lines.append(f"  PLAN      unavailable ({pl.error})")
     return "\n".join(lines)

@@ -192,8 +192,8 @@ def panel_plan(snap: Snapshot) -> Panel:
     kv = _kv()
     kv.add_row("5-hour", f"{fmt_pct100(pl.five_hour_pct)}   resets {reset_in(pl.five_hour_resets_at)}")
     kv.add_row("weekly", fmt_pct100(pl.seven_day_pct))
-    kv.add_row("wk opus", fmt_pct100(pl.seven_day_opus_pct))
-    kv.add_row("wk sonnet", fmt_pct100(pl.seven_day_sonnet_pct))
+    for label, pct in pl.weekly_scoped:
+        kv.add_row(f"wk {label.lower()}", fmt_pct100(pct))
     body = [bar((pl.five_hour_pct or 0) / 100.0, 34), kv]
     if pl.extra_enabled:
         body.append(Text(f"extra usage: {fmt_pct100(pl.extra_pct)}", style="grey62"))

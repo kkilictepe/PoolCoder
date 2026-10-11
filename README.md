@@ -78,7 +78,7 @@ unauthenticated** — only expose it on a network you trust (use
 | **Activity** | what Claude is doing *now* (in-flight tool), tool-call counts by name, errors, files touched |
 | **Subagents** | each subagent's type, description, running/done, turns, in-flight tools, token total |
 | **Workflows** | per workflow: name, phases, agents started/running/done (from the journal) |
-| **Plan limits** | 5-hour window % + reset countdown, weekly / weekly-Opus / weekly-Sonnet % (via the OAuth usage endpoint) |
+| **Plan limits** | 5-hour window % + reset countdown, weekly % plus any model-scoped weekly limits (e.g. Fable) reported by the OAuth usage endpoint |
 | **Recent activity** | live play-by-play: Claude's text replies (`↳`), thinking (`✎`), your prompts (`»`), tool calls/results (`→`/`✓`/`✗`, with the active TodoWrite item), compactions (`⟳`), and subagent/workflow lifecycle |
 
 ## Configuration

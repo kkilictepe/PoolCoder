@@ -23,7 +23,7 @@ from ..config import PLAN_LIMITS_INTERVAL
 from ..snapshot import PlanLimitsView
 
 USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
-DEFAULT_USER_AGENT = "claude-code/2.1.178"  # UA is required or the endpoint 429s
+DEFAULT_USER_AGENT = "claude-code/2.1.198"  # UA is required or the endpoint 429s
 HTTP_TIMEOUT = 30
 
 
@@ -122,16 +122,48 @@ class PlanLimitsSource:
             value = usage.get(key)
             return value if isinstance(value, dict) else {}
 
+        five_hour_pct = window("five_hour").get("utilization")
+        five_hour_resets = _iso(window("five_hour").get("resets_at"))
+        seven_day_pct = window("seven_day").get("utilization")
+        seven_day_resets = _iso(window("seven_day").get("resets_at"))
+        scoped: list[tuple[str, float]] = []
+
+        # Newer responses carry a ``limits`` array with per-scope weekly
+        # entries (e.g. a separate Fable limit); the legacy ``seven_day_opus``
+        # / ``seven_day_sonnet`` windows are null there.
+        limits = usage.get("limits")
+        if isinstance(limits, list):
+            for entry in limits:
+                if not isinstance(entry, dict):
+                    continue
+                kind = entry.get("kind")
+                pct = entry.get("percent")
+                if kind == "session":
+                    five_hour_pct = pct if pct is not None else five_hour_pct
+                    five_hour_resets = _iso(entry.get("resets_at")) or five_hour_resets
+                elif kind == "weekly_all":
+                    seven_day_pct = pct if pct is not None else seven_day_pct
+                    seven_day_resets = _iso(entry.get("resets_at")) or seven_day_resets
+                elif kind == "weekly_scoped" and pct is not None:
+                    scope = entry.get("scope") if isinstance(entry.get("scope"), dict) else {}
+                    model = scope.get("model") if isinstance(scope.get("model"), dict) else {}
+                    label = model.get("display_name") or scope.get("surface") or "scoped"
+                    scoped.append((str(label), float(pct)))
+        else:
+            for key, label in (("seven_day_opus", "Opus"), ("seven_day_sonnet", "Sonnet")):
+                pct = window(key).get("utilization")
+                if pct is not None:
+                    scoped.append((label, float(pct)))
+
         extra = window("extra_usage")
         return PlanLimitsView(
             available=True,
             error=None,
-            five_hour_pct=window("five_hour").get("utilization"),
-            five_hour_resets_at=_iso(window("five_hour").get("resets_at")),
-            seven_day_pct=window("seven_day").get("utilization"),
-            seven_day_resets_at=_iso(window("seven_day").get("resets_at")),
-            seven_day_opus_pct=window("seven_day_opus").get("utilization"),
-            seven_day_sonnet_pct=window("seven_day_sonnet").get("utilization"),
+            five_hour_pct=five_hour_pct,
+            five_hour_resets_at=five_hour_resets,
+            seven_day_pct=seven_day_pct,
+            seven_day_resets_at=seven_day_resets,
+            weekly_scoped=tuple(scoped),
             extra_enabled=bool(extra.get("is_enabled")),
             extra_pct=extra.get("utilization"),
         )
