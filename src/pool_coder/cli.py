@@ -5,9 +5,10 @@
     pool-coder --list          list sessions and exit
     pool-coder --once [--json] print one snapshot and exit (headless)
     pool-coder --codex ...     the same for OpenAI Codex (= --agent codex)
+    pool-coder --agent all ... Claude Code and Codex sessions together
 
 Claude Code is the default agent. The agent's ``Provider`` supplies session
-listing, lookup and previews, so every mode works for either agent.
+listing, lookup and previews, so every mode works for either agent or both.
 
 The headless paths import nothing from the UI, which is the acceptance test
 for the core/UI decoupling.
@@ -38,15 +39,26 @@ from .format import (
 )
 from .paths import SessionInfo
 from .pricing import Pricing
-from .providers import CLAUDE, PROVIDERS, Provider, get_provider
+from .providers import (
+    AGENT_CHOICES,
+    ALL,
+    CLAUDE,
+    PROVIDERS,
+    agent_prefix,
+    find_session,
+    get_provider,
+    list_sessions,
+    providers_for,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="pool-coder",
         description="Realtime monitor for coding-agent sessions (Claude Code or Codex).")
-    p.add_argument("--agent", choices=sorted(PROVIDERS), default="claude",
-                   help="which agent's sessions to monitor (default: claude)")
+    p.add_argument("--agent", choices=AGENT_CHOICES, default="claude",
+                   help="which agent's sessions to monitor; all = Claude Code and Codex "
+                        "together (default: claude)")
     p.add_argument("--codex", action="store_const", const="codex", dest="agent",
                    default="claude", help="shorthand for --agent codex")
     p.add_argument("--list", action="store_true", help="list sessions and exit")
@@ -78,27 +90,33 @@ def _jsonable(obj) -> str:
     return json.dumps(dataclasses.asdict(obj), default=default, indent=2)
 
 
-def _command(prov: Provider) -> str:
+def _command(agent: str) -> str:
     """How to invoke pool-coder for this agent (Claude needs no flag)."""
-    return "pool-coder" if prov is CLAUDE else f"pool-coder --{prov.name}"
+    provs = providers_for(agent)
+    if len(provs) > 1:
+        return f"pool-coder --agent {ALL}"
+    return "pool-coder" if provs[0] is CLAUDE else f"pool-coder --{provs[0].name}"
 
 
 def print_session_list(config: Config, show_all: bool) -> None:
-    prov = get_provider(config.agent)
-    sessions = prov.list_sessions()
+    provs = providers_for(config.agent)
+    mixed = len(provs) > 1  # both agents: an AGENT column tells them apart
+    sessions = list_sessions(provs)
     if not show_all:
         sessions = [s for s in sessions if s.age_seconds() <= config.active_window_seconds]
     if not sessions:
-        agent = "" if prov is CLAUDE else f"{prov.label} "
+        agent = agent_prefix(config.agent)
         print(f"No active {agent}sessions in the last 15 min. Use --all to show older ones.")
         return
-    print(f"{'':3}{'AGE':>10}  {'CTX':>5}  {'MODEL':<16} {'PROJECT':<22} LAST")
+    agent_head = f"{'AGENT':<6} " if mixed else ""
+    print(f"{'':3}{'AGE':>10}  {'CTX':>5}  {agent_head}{'MODEL':<16} {'PROJECT':<22} LAST")
     for s in sessions[:60]:
-        ov = prov.peek_session(s, config)
+        ov = get_provider(s.agent).peek_session(s, config)
         live = " ● " if ov.is_live else "   "
-        print(f"{live}{fmt_age(s.age_seconds()):>10}  {fmt_pct(ov.occupancy):>5}  "
+        agent = f"{s.agent:<6} " if mixed else ""
+        print(f"{live}{fmt_age(s.age_seconds()):>10}  {fmt_pct(ov.occupancy):>5}  {agent}"
               f"{(ov.model or '?'):<16.16} {ov.label:<22.22} {ov.last_shown[:46]}")
-    cmd = _command(prov)
+    cmd = _command(config.agent)
     print(f"\n{len(sessions)} session(s). Run `{cmd} --session <id>` or just `{cmd}`.")
 
 
@@ -204,10 +222,10 @@ def format_snapshot_human(snap) -> str:
 
 
 def _choose(args: argparse.Namespace, config: Config) -> SessionInfo | None:
-    prov = get_provider(config.agent)
+    provs = providers_for(config.agent)
     if args.session:
-        return prov.find_session(args.session)
-    sessions = prov.list_sessions()
+        return find_session(provs, args.session)
+    sessions = list_sessions(provs)
     if not sessions:
         return None
     if args.once:
@@ -240,7 +258,7 @@ def main(argv: list[str] | None = None) -> int:
 
     info = _choose(args, config)
     if info is None and (args.once or args.session):
-        cmd = _command(get_provider(config.agent))
+        cmd = _command(config.agent)
         print(f"error: no matching session (try `{cmd} --list`)", file=sys.stderr)
         return 1
 

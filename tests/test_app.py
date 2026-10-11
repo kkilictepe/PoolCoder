@@ -82,8 +82,9 @@ def _picker_state(config: Config) -> tuple[str, list[tuple[str, str]], str]:
 def test_app_constructs_with_codex_config():
     app = PoolCoderApp(None, Config(agent="codex"), Pricing.load())
     assert app.config.agent == "codex"
-    assert PickerScreen(Config(agent="codex")).provider is CODEX
-    assert PickerScreen(Config()).provider is CLAUDE
+    assert PickerScreen(Config(agent="codex")).providers == (CODEX,)
+    assert PickerScreen(Config()).providers == (CLAUDE,)
+    assert PickerScreen(Config(agent="all")).providers == (CLAUDE, CODEX)
 
 
 def test_codex_picker_lists_codex_sessions(codex_home):
@@ -103,7 +104,8 @@ def test_codex_picker_marks_a_thread_name_standing_in_for_the_prompt(monkeypatch
     from pool_coder.codex import overview as codex_overview
     from pool_coder.overview import SessionOverview
 
-    info = paths.SessionInfo(Path("x.jsonl"), cr.ROOT, "2026/09/22", datetime.now(timezone.utc), 1)
+    info = paths.SessionInfo(Path("x.jsonl"), cr.ROOT, "2026/09/22", datetime.now(timezone.utc), 1,
+                             agent="codex")
     ov = SessionOverview(info=info, cwd="C:/p", model="gpt-5.6-sol", git_branch=None,
                          context_tokens=1, occupancy=0.5, last_text="Auto [b]title",
                          is_live=True, last_is_title=True)

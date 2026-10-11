@@ -147,7 +147,7 @@ def test_help_is_agent_neutral(capsys):
         build_parser().parse_args(["--help"])
     out = capsys.readouterr().out
     assert "Claude Code or Codex" in out
-    assert "--codex" in out and "{claude,codex}" in out
+    assert "--codex" in out and "{claude,codex,all}" in out
     assert "OAuth" not in out
     # a rollout's reported window always wins: gpt=N is no override for Codex
     text = " ".join(out.split())

@@ -1,6 +1,6 @@
 # pool-coder
 
-Realtime terminal/web dashboard for **Claude Code** or **OpenAI Codex**
+Realtime terminal/web dashboard for **Claude Code** and/or **OpenAI Codex**
 sessions (CLI, VS Code extension, Desktop) running on your local computer. It
 tails the session transcript **read-only** — for Claude Code
 `~/.claude/projects/<project-hash>/<session-id>.jsonl` plus its subagent and
@@ -27,9 +27,10 @@ Requires [uv](https://docs.astral.sh/uv/) and Python ≥ 3.12.
 
 ```sh
 uv sync                      # create the venv and install pool-coder
-uv run pool-coder            # interactive picker -> live dashboard
-uv run pool-coder --codex    # the same for OpenAI Codex sessions
-uv run pool-coder --serve    # serve the dashboard over HTTP (open on your phone)
+uv run pool-coder              # interactive picker -> live dashboard
+uv run pool-coder --codex      # the same for OpenAI Codex sessions
+uv run pool-coder --agent all  # Claude Code and Codex sessions together
+uv run pool-coder --serve      # serve the dashboard over HTTP (open on your phone)
 ```
 
 ## Usage
@@ -64,6 +65,17 @@ uv run pool-coder --codex --once                 # one text snapshot (headless)
 uv run pool-coder --agent codex --once --json    # one snapshot as JSON
 ```
 
+To watch **both** at once use `--agent all` with any mode. The list, picker
+and web views then merge Claude Code and Codex sessions, newest first, and tag
+each one with its agent. Each session keeps its own agent's panels and plan
+limits. `--session <id>` accepts either kind of id. (`--agent all` is not the
+`--all` flag, which adds idle sessions.)
+
+```sh
+uv run pool-coder --agent all --serve   # one web dashboard for both agents
+uv run pool-coder --agent all --list    # list active sessions of both agents
+```
+
 Options: `--all` (include idle sessions), `--no-plan-limits` (skip the plan
 limits panel), `--window opus=200000` (override a context-window size,
 repeatable; for Codex `gpt=N` is only a fallback, see
@@ -79,7 +91,8 @@ uv run pool-coder --serve     # prints a phone URL like http://192.168.1.x:8765/
 
 Open that URL on any device on the **same Wi-Fi**. You get a responsive HTML
 dashboard (same metrics as the TUI) that auto-refreshes: `/` lists active
-sessions (Codex ones with `--codex`), tap one to monitor it, or choose
+sessions (Codex ones with `--codex`, both agents' with `--agent all`), tap one
+to monitor it, or choose
 **Monitor all** to open `/all`. The all-sessions view puts each matching
 session in a horizontally scrollable column; existing columns keep their
 positions as activity changes, and new sessions append to the right. It
@@ -170,8 +183,9 @@ URL still works). It's
   than its old percentage, and no bar. Business/unlimited
   plans report no windows and show a note instead, e.g.
   `business · unlimited credits`.
-- **One agent per run** — the picker never mixes Claude and Codex sessions;
-  run a second instance (e.g. `--codex --serve --port 8766`) to watch both.
+- **Both agents** — `--codex` shows only Codex sessions. Use `--agent all` to
+  list them alongside Claude Code's: one server, one `/all` page, each session
+  tagged `claude` or `codex` (see [Usage](#usage)).
 
 ## Configuration
 
@@ -215,11 +229,14 @@ plan-limits*┘                                                    ▲ get_snaps
 * per agent (Claude Code or Codex), chosen through providers.py
 ```
 
-- **providers** — the agent seam. `get_provider(config.agent)` returns a
-  `Provider` that bundles one agent's session discovery (list/find), picker
-  preview, parser + fold (`open_session` → aggregator + `JsonlSource`) and
-  plan-limit source. Engine, CLI, picker and web go through it;
-  `SessionState`, the snapshot and the renderers are shared.
+- **providers** — the agent seam. A `Provider` bundles one agent's session
+  discovery (list/find), picker preview, parser + fold (`open_session` →
+  aggregator + `JsonlSource`) and plan-limit source.
+  `providers_for(config.agent)` returns the selected ones (both for `all`),
+  whose session lists merge newest first. Every `SessionInfo` names its
+  agent, and `get_provider(info.agent)` previews and reads it. Engine, CLI,
+  picker and web go through it; `SessionState`, the snapshot and the
+  renderers are shared.
 - **tailer** — read-only byte-offset reader; handles partial lines, UTF-8 splits
   across reads, truncation/rotation, and huge-file catch-up.
 - **discovery** — glob-diffs the four sidecar patterns, attaching a tailer per
@@ -244,6 +261,7 @@ test for the core/UI split.
 uv run pytest          # tailer, state, aggregator, discovery, jsonl source, config, pricing,
                        # format, render, app, web + codex parser, paths, aggregator,
                        # discovery, overview, limits, cli (tests/test_codex_*.py)
+                       # + --agent all across modes (tests/test_agent_all.py)
 ```
 
 Codex tests run against a temporary `CODEX_HOME` (the `codex_home` fixture in

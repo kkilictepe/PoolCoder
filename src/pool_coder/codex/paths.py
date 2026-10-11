@@ -359,6 +359,7 @@ def list_sessions(include_subagents: bool = False, root: Path | None = None) -> 
             project_hash=folder,
             mtime=last_activity(path, st),
             size=st.st_size,
+            agent="codex",
         )
         prev = best.get(info.session_id)
         if prev is None or info.mtime > prev.mtime:
@@ -395,6 +396,7 @@ def find_session(session_id: str, root: Path | None = None) -> SessionInfo | Non
             project_hash=folder,
             mtime=last_activity(path, st),
             size=st.st_size,
+            agent="codex",
         )
         if best is None or info.mtime > best.mtime:
             best = info

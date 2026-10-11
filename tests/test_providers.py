@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 from datetime import datetime, timezone
 
 import pytest
@@ -230,4 +231,4 @@ def test_engine_claude_snapshot_once(claude_info):
 
 def test_engine_unknown_agent_raises(claude_info):
     with pytest.raises(ValueError):
-        Engine(claude_info, Config(agent="nope"))
+        Engine(dataclasses.replace(claude_info, agent="nope"), Config())

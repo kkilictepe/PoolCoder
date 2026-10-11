@@ -2,12 +2,12 @@
 
 A second renderer over the same decoupled core. ``EngineManager`` lazily runs
 one ``Engine`` per viewed session (idle-evicted, with active all-view batches
-protected from the ordinary cache cap) and shares a single plan-limits poller.
-The HTTP layer reads immutable snapshots and renders HTML — it never touches
-mutable state. Stdlib only (matches ``usage-exporter``).
-Sessions, previews and the plan poller come from the provider of
-``config.agent`` (Claude Code or Codex); Codex differs only in the tokens and
-plan cards.
+protected from the ordinary cache cap) and shares one plan-limits poller per
+agent. The HTTP layer reads immutable snapshots and renders HTML — it never
+touches mutable state. Stdlib only (matches ``usage-exporter``).
+Sessions, previews and the plan pollers come from the providers of
+``config.agent`` (Claude Code, Codex, or both with ``all``, where each session
+is tagged with its agent); Codex differs only in the tokens and plan cards.
 
 Endpoints:
     GET /                 session list (auto-refreshing)
@@ -41,7 +41,16 @@ from .format import (
 )
 from .paths import SessionInfo
 from .pricing import Pricing
-from .providers import CLAUDE, get_provider
+from .providers import (
+    ALL,
+    CLAUDE,
+    Provider,
+    agent_label,
+    agent_prefix,
+    get_provider,
+    list_sessions,
+    providers_for,
+)
 from .snapshot import PlanLimitsView, SessionSnapshot, Snapshot
 
 esc = html.escape
@@ -62,6 +71,19 @@ def _transcript_gone(engine: Engine) -> bool:
     return False
 
 
+_Key = tuple[str, str]  # (agent, session id as that agent's find_session matches it)
+
+
+def _key(prov: Provider, session_id: str) -> _Key:
+    """One cache key per session however its id is spelled (Codex ids match
+    case-insensitively; Claude ids exactly), kept apart per agent."""
+    return prov.name, prov.normalize_id(session_id)
+
+
+def _session_key(info: SessionInfo) -> _Key:
+    return _key(get_provider(info.agent), info.session_id)
+
+
 class EngineManager:
     """Lazily runs an Engine per viewed session; evicts idle ones."""
 
@@ -71,17 +93,31 @@ class EngineManager:
         self.pricing = pricing
         self.max_engines = max_engines
         self.idle_ttl = idle_ttl
-        self._engines: dict[str, Engine] = {}
-        self._last: dict[str, float] = {}
-        self._active_order: list[str] = []
+        self._engines: dict[_Key, Engine] = {}
+        self._last: dict[_Key, float] = {}
+        self._active_order: list[_Key] = []
         self._lock = threading.Lock()
-        self.provider = get_provider(config.agent)
-        self.plan = (self.provider.make_plan_source()
-                     if (enable_plan_limits and config.plan_limits) else None)
-        if self.plan:
-            self.plan.start()
+        self.providers = providers_for(config.agent)
+        # one plan-limits poller per agent, shared by all of its sessions
+        self.plans = ({prov.name: prov.make_plan_source() for prov in self.providers}
+                      if (enable_plan_limits and config.plan_limits) else {})
+        for plan in self.plans.values():
+            plan.start()
 
-    def _evict_locked(self, now: float, protected: set[str] | None = None) -> None:
+    def _with_plan(self, snap: Snapshot | None) -> Snapshot | None:
+        """``snap`` with the shared plan limits of its own agent."""
+        plan = self.plans.get(snap.session.agent) if snap is not None else None
+        return snap if plan is None else dataclasses.replace(snap, plan_limits=plan.view)
+
+    def _find(self, session_id: str) -> tuple[_Key, SessionInfo] | None:
+        """The first provider's session with this id, under its cache key."""
+        for prov in self.providers:
+            info = prov.find_session(session_id)
+            if info is not None:
+                return _key(prov, session_id), info
+        return None
+
+    def _evict_locked(self, now: float, protected: set[_Key] | None = None) -> None:
         protected = protected or set()
         for sid in list(self._engines):
             if sid not in protected and now - self._last.get(sid, now) > self.idle_ttl:
@@ -98,41 +134,40 @@ class EngineManager:
     def snapshot(self, session_id: str) -> Snapshot | None:
         now = time.monotonic()
         # one engine per session however the URL spells it (Codex ids match
-        # case-insensitively; Claude ids exactly, as before)
-        session_id = self.provider.normalize_id(session_id)
+        # case-insensitively; Claude ids exactly, as before), under any agent
+        keys = [_key(prov, session_id) for prov in self.providers]
         with self._lock:
             self._evict_locked(now)
-            engine = self._engines.get(session_id)
+            key = next((k for k in keys if k in self._engines), None)
+            engine = self._engines.get(key) if key is not None else None
             if engine is not None:
-                self._last[session_id] = now
+                self._last[key] = now
         if engine is not None and _transcript_gone(engine):
             # Deleted: stop serving it (a 404 below, as before the reuse; a
             # moved transcript is simply found again).
             with self._lock:
-                ours = self._engines.get(session_id) is engine  # not replaced meanwhile
+                ours = self._engines.get(key) is engine  # not replaced meanwhile
                 if ours:
-                    del self._engines[session_id]
-                    self._last.pop(session_id, None)
+                    del self._engines[key]
+                    self._last.pop(key, None)
             if ours:
                 engine.stop()
             engine = None
         if engine is None:
             # Only a session without a running engine is looked up: the page
             # polls every 1.5 s, and a Codex lookup globs the sessions tree.
-            info = self.provider.find_session(session_id)
-            if info is None:
+            found = self._find(session_id)
+            if found is None:
                 return None
+            key, info = found
             with self._lock:
-                engine = self._engines.get(session_id)  # another request may have won
+                engine = self._engines.get(key)  # another request may have won
                 if engine is None:
                     engine = Engine(info, self.config, self.pricing, enable_plan_limits=False)
                     engine.start()
-                    self._engines[session_id] = engine
-                self._last[session_id] = now
-        snap = engine.get_snapshot()
-        if snap is not None and self.plan is not None:
-            snap = dataclasses.replace(snap, plan_limits=self.plan.view)
-        return snap
+                    self._engines[key] = engine
+                self._last[key] = now
+        return self._with_plan(engine.get_snapshot())
 
     def snapshots(self, sessions: list[SessionInfo]) -> list[Snapshot]:
         """Snapshots for one discovered batch, preserving its order.
@@ -143,61 +178,59 @@ class EngineManager:
         window return to the normal idle/cap eviction rules.
         """
         now = time.monotonic()
-        requested: list[tuple[str, SessionInfo]] = []
-        seen: set[str] = set()
+        requested: list[tuple[_Key, SessionInfo]] = []
+        seen: set[_Key] = set()
         for info in sessions:
-            sid = self.provider.normalize_id(info.session_id)
-            if sid in seen:
+            key = _session_key(info)
+            if key in seen:
                 continue
-            seen.add(sid)
-            requested.append((sid, info))
+            seen.add(key)
+            requested.append((key, info))
 
         engines: list[Engine] = []
         with self._lock:
             self._evict_locked(now, seen)
-            for sid, info in requested:
-                engine = self._engines.get(sid)
+            for key, info in requested:
+                engine = self._engines.get(key)
                 if engine is not None and _transcript_gone(engine):
-                    self._engines.pop(sid, None)
-                    self._last.pop(sid, None)
+                    self._engines.pop(key, None)
+                    self._last.pop(key, None)
                     engine.stop()
                     engine = None
                 if engine is None:
                     engine = Engine(info, self.config, self.pricing, enable_plan_limits=False)
                     engine.start()
-                    self._engines[sid] = engine
-                self._last[sid] = now
+                    self._engines[key] = engine
+                self._last[key] = now
                 engines.append(engine)
 
         out: list[Snapshot] = []
         for engine in engines:
-            snap = engine.get_snapshot()
+            snap = self._with_plan(engine.get_snapshot())
             if snap is not None:
-                if self.plan is not None:
-                    snap = dataclasses.replace(snap, plan_limits=self.plan.view)
                 out.append(snap)
         return out
 
     def active_snapshots(self) -> list[Snapshot]:
         """All provider sessions inside the active window, in stable order.
 
-        Discovery is newest-first only for the initial placement. Existing
-        sessions keep their relative positions on later polls, while newly
-        discovered sessions append to the right.
+        Discovery is newest-first (across agents) only for the initial
+        placement. Existing sessions keep their relative positions on later
+        polls, while newly discovered sessions append to the right.
         """
         sessions = [
-            info for info in self.provider.list_sessions()
+            info for info in list_sessions(self.providers)
             if info.age_seconds() <= self.config.active_window_seconds
         ]
         sessions.sort(key=lambda info: info.mtime, reverse=True)
-        by_id: dict[str, SessionInfo] = {}
+        by_key: dict[_Key, SessionInfo] = {}
         for info in sessions:
-            by_id.setdefault(self.provider.normalize_id(info.session_id), info)
+            by_key.setdefault(_session_key(info), info)
         with self._lock:
-            self._active_order = [sid for sid in self._active_order if sid in by_id]
+            self._active_order = [key for key in self._active_order if key in by_key]
             known = set(self._active_order)
-            self._active_order.extend(sid for sid in by_id if sid not in known)
-            ordered = [by_id[sid] for sid in self._active_order]
+            self._active_order.extend(key for key in by_key if key not in known)
+            ordered = [by_key[key] for key in self._active_order]
         return self.snapshots(ordered)
 
     def stop_all(self) -> None:
@@ -207,8 +240,8 @@ class EngineManager:
             self._engines.clear()
             self._last.clear()
             self._active_order.clear()
-            if self.plan:
-                self.plan.stop()
+            for plan in self.plans.values():
+                plan.stop()
 
 
 # --------------------------------------------------------------------------- #
@@ -229,6 +262,8 @@ button{font:inherit;}
 .hdr .r1{display:flex;flex-wrap:wrap;gap:6px;align-items:center;}
 .proj{font-weight:700;color:#e6edf3;} .model{color:#39c5cf;}
 .mode{color:#bc8cff;} .dim{color:#8b949e;}
+.agent{font-size:12px;padding:0 5px;border:1px solid #30363d;border-radius:6px;color:#8b949e;}
+.agent.claude{color:#f0883e;} .agent.codex{color:#79c0ff;}
 .badge{font-weight:700;padding:0 6px;border-radius:6px;}
 .badge.live{color:#3fb950;} .badge.idle{color:#8b949e;}
 .prompt{color:#adbac7;font-style:italic;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
@@ -436,15 +471,22 @@ def _occ_color(frac: float) -> str:
     return "#3fb950" if frac < 0.6 else "#d29922" if frac < 0.85 else "#f85149"
 
 
-def _header_body(snap: Snapshot, action: str = "") -> str:
+def _agent_tag(agent: str) -> str:
+    """Whose session it is, where both agents are listed (``--agent all``)."""
+    return f"<span class='agent {esc(agent, quote=True)}'>{esc(agent)}</span>"
+
+
+def _header_body(snap: Snapshot, action: str = "", show_agent: bool = False) -> str:
     s = snap.session
     badge = ("<span class='badge live'>● live</span>" if s.is_live
              else f"<span class='badge idle'>idle {esc(fmt_age(s.idle_s))}</span>")
+    agent = _agent_tag(s.agent) if show_agent else ""
     mode = f"<span class=mode>[{esc(s.mode)}]</span>" if s.mode and s.mode != "normal" else ""
     loading = "<span class=mode>⏳ loading…</span>" if snap.loading else ""
     prompt = esc(s.last_prompt) if s.last_prompt else "<span class=dim>(no prompt yet)</span>"
     return (
-        f"<div class=r1>{badge}{loading}<span class=proj>{esc(s.cwd or s.project_hash)}</span>"
+        f"<div class=r1>{badge}{agent}{loading}"
+        f"<span class=proj>{esc(s.cwd or s.project_hash)}</span>"
         f"<span class=dim>({esc(s.git_branch or 'no branch')})</span>"
         f"<span class=model>{esc(s.model or '?')}</span>{mode}{action}</div>"
         f"<div class=dim>{esc(fmt_duration(s.duration_s))} · {s.turns} turns · {s.user_messages} prompts</div>"
@@ -689,7 +731,7 @@ def _card_activity_tabs(snapshots: list[Snapshot]) -> str:
     return f"<div class=activity-card>{_card('Recent activity', inner, wide=True)}</div>"
 
 
-def _session_column(snap: Snapshot) -> str:
+def _session_column(snap: Snapshot, show_agent: bool = False) -> str:
     s = snap.session
     sid = esc(s.session_id, quote=True)
     label = _session_label(s)
@@ -703,13 +745,13 @@ def _session_column(snap: Snapshot) -> str:
     ])
     return (
         f"<article class=session-column data-session-id='{sid}'>"
-        f"<div class='session-head hdr'>{_header_body(snap, action)}</div>"
+        f"<div class='session-head hdr'>{_header_body(snap, action, show_agent)}</div>"
         f"<div class=session-stack>{panels}</div></article>"
     )
 
 
 def fragment_all(snapshots: list[Snapshot], config: Config) -> str:
-    prov = get_provider(config.agent)
+    mixed = len(providers_for(config.agent)) > 1  # tag each column with its agent
     count = len(snapshots)
     restore = "".join(
         f"<button type=button class=btn data-action=show data-session-id='"
@@ -722,7 +764,7 @@ def fragment_all(snapshots: list[Snapshot], config: Config) -> str:
     )
     toolbar = (
         "<div class='topbar multi-toolbar'><div class=r1><span class=proj>pool-coder</span>"
-        f"<span class=dim>all active {esc(prov.label)} sessions · {count} matched · "
+        f"<span class=dim>all active {esc(agent_label(config.agent))} sessions · {count} matched · "
         f"<span data-visible-count>{count} shown</span></span>"
         "<a class='btn list-action' href='/'>Session list</a></div>"
         f"{tray}</div>"
@@ -730,7 +772,7 @@ def fragment_all(snapshots: list[Snapshot], config: Config) -> str:
     if not snapshots:
         return (toolbar + "<div class=all-hidden>No sessions in the configured active window. "
                 "The dashboard will update automatically.</div>" + _card_activity_tabs([]))
-    columns = "".join(_session_column(snap) for snap in snapshots)
+    columns = "".join(_session_column(snap, mixed) for snap in snapshots)
     hidden_empty = (
         "<div class=all-hidden data-all-hidden hidden>All matching sessions are hidden. "
         "Use a Show button above to restore one.</div>"
@@ -758,31 +800,33 @@ def page_dashboard(session_id: str, snap: Snapshot | None, agent: str | None = N
 
 
 def page_all(snapshots: list[Snapshot], config: Config) -> str:
-    prov = get_provider(config.agent)
-    title = f"pool-coder · all {prov.label} sessions"
+    provs = providers_for(config.agent)
+    title = f"pool-coder · all {agent_label(config.agent)} sessions"
+    # the browser remembers hidden sessions per agent selection
     return _page(title, fragment_all(snapshots, config), "/partial/all",
-                 multi_agent=prov.name)
+                 multi_agent=ALL if len(provs) > 1 else provs[0].name)
 
 
 def fragment_list(config: Config) -> str:
-    prov = get_provider(config.agent)
-    sessions = [s for s in prov.list_sessions()
+    provs = providers_for(config.agent)
+    mixed = len(provs) > 1  # tag each row with its agent
+    sessions = [s for s in list_sessions(provs)
                 if s.age_seconds() <= config.active_window_seconds][:40]
     header = ("<div class='topbar hdr'><div class=r1><span class=proj>pool-coder</span>"
-              f"<span class=dim>active {esc(prov.label)} sessions — tap to monitor</span>"
+              f"<span class=dim>active {esc(agent_label(config.agent))} sessions — tap to monitor</span>"
               "<a class='btn list-action' href='/all'>Monitor all</a></div></div>")
     if not sessions:
-        agent = "" if prov is CLAUDE else f"{esc(prov.label)} "
         return (header + f"<div class=dim style='padding:20px'>"
-                f"No active {agent}sessions in the last 15 min.</div>")
+                f"No active {esc(agent_prefix(config.agent))}sessions in the last 15 min.</div>")
     rows = []
     for info in sessions:
-        ov = prov.peek_session(info, config)
+        ov = get_provider(info.agent).peek_session(info, config)
         dot = "<span class='badge live'>●</span>" if ov.is_live else "<span class=dim>○</span>"
+        tag = _agent_tag(info.agent) if mixed else ""
         rows.append(
             f"<a class=row href='/s/{urllib.parse.quote(info.session_id)}'>{dot}"
             f"<span class=dim>{esc(fmt_age(info.age_seconds()))}</span>"
-            f"<span class=pct>{esc(fmt_pct(ov.occupancy))}</span>"
+            f"<span class=pct>{esc(fmt_pct(ov.occupancy))}</span>{tag}"
             f"<span class=name>{esc(ov.label)}</span>"
             f"<span class=last>{esc(ov.last_shown[:60])}</span></a>"
         )
@@ -790,8 +834,8 @@ def fragment_list(config: Config) -> str:
 
 
 def page_list(config: Config) -> str:
-    prov = get_provider(config.agent)
-    title = "pool-coder" if prov is CLAUDE else f"pool-coder · {prov.label}"
+    title = ("pool-coder" if providers_for(config.agent) == (CLAUDE,)
+             else f"pool-coder · {agent_label(config.agent)}")
     return _page(title, fragment_list(config), "/partial/list", ms=3000)
 
 
@@ -851,7 +895,10 @@ def _make_handler(manager: EngineManager, default_sid: str | None):
                                code=200 if snap is not None else 404)
                 elif path.startswith("/s/"):
                     sid = urllib.parse.unquote(path[len("/s/"):])
-                    self._send(page_dashboard(sid, manager.snapshot(sid), manager.provider.name))
+                    # a found session's title follows its own agent; a lone agent's otherwise
+                    providers = manager.providers
+                    agent = providers[0].name if len(providers) == 1 else None
+                    self._send(page_dashboard(sid, manager.snapshot(sid), agent))
                 elif path == "/all":
                     self._send(page_all(manager.active_snapshots(), manager.config))
                 else:
@@ -887,7 +934,7 @@ def serve(host: str, port: int, config: Config, pricing: Pricing,
     httpd = ThreadingHTTPServer((host, port), _make_handler(manager, session))
     httpd.daemon_threads = True
 
-    agent = "" if manager.provider is CLAUDE else f" ({manager.provider.label})"
+    agent = "" if manager.providers == (CLAUDE,) else f" ({agent_label(config.agent)})"
     print(f"pool-coder — web dashboard{agent}")
     print(f"  local : http://127.0.0.1:{port}/")
     if host in ("0.0.0.0", "::"):

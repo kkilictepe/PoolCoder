@@ -65,7 +65,7 @@ def peek_session(info: SessionInfo, config: Config | None = None,
             text = clean_prompt(rec.user_text())
             if text:
                 last_text = text
-    window = config.window_for(model, max_ctx)
+    window = config.window_for(model, max_ctx, agent="claude")  # also under --agent all
     return SessionOverview(
         info=info,
         cwd=cwd,

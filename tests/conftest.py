@@ -33,3 +33,18 @@ def codex_home(tmp_path, monkeypatch):
     _clear_codex_caches()
     yield home
     _clear_codex_caches()
+
+
+@pytest.fixture
+def claude_projects(tmp_path, monkeypatch):
+    """A temporary, empty ``~/.claude/projects``.
+
+    Points the home directory at ``tmp_path`` so Claude Code lookups (and
+    its credentials) never touch the real ``~/.claude``.
+    """
+    projects = tmp_path / ".claude" / "projects"
+    projects.mkdir(parents=True)
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("POOL_CODER_CREDENTIALS", raising=False)
+    return projects

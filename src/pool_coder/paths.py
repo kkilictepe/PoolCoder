@@ -82,6 +82,7 @@ class SessionInfo:
     project_hash: str
     mtime: datetime
     size: int
+    agent: str = "claude"  # which agent wrote the transcript: its provider reads it
 
     def age_seconds(self, now: datetime | None = None) -> float:
         now = now or datetime.now(timezone.utc)

@@ -3,7 +3,7 @@
 The dashboard owns an ``Engine`` (reader thread). On every interval it pulls an
 immutable ``Snapshot`` via ``engine.get_snapshot()`` and repaints the panels —
 the UI never touches mutable state. Which sessions the picker lists (Claude
-Code or Codex) comes from the provider of ``config.agent``.
+Code, Codex or both) comes from the providers of ``config.agent``.
 """
 
 from __future__ import annotations
@@ -21,8 +21,18 @@ from ..engine import Engine
 from ..format import fmt_age, fmt_pct
 from ..paths import SessionInfo
 from ..pricing import Pricing
-from ..providers import CLAUDE, get_provider
+from ..providers import (
+    CLAUDE,
+    agent_label,
+    agent_prefix,
+    get_provider,
+    list_sessions,
+    providers_for,
+)
 from . import render
+
+# The agent tag on picker rows when both agents are listed (--agent all).
+_AGENT_STYLE = {"claude": "dark_orange", "codex": "sky_blue2"}
 
 
 class PickerScreen(Screen):
@@ -35,7 +45,7 @@ class PickerScreen(Screen):
     def __init__(self, config: Config):
         super().__init__()
         self.config = config
-        self.provider = get_provider(config.agent)
+        self.providers = providers_for(config.agent)
         self.show_all = config.active_window_seconds > 10 ** 12
         self._by_id: dict[str, SessionInfo] = {}
 
@@ -49,11 +59,13 @@ class PickerScreen(Screen):
         self.action_reload()
 
     def _format(self, info: SessionInfo) -> Text:
-        ov = self.provider.peek_session(info, self.config)
+        ov = get_provider(info.agent).peek_session(info, self.config)
         line = Text(no_wrap=True, overflow="ellipsis")
         line.append(" ● " if ov.is_live else "   ", style="bold green")
         line.append(f"{fmt_age(info.age_seconds()):>10}  ", style="grey62")
         line.append(f"{fmt_pct(ov.occupancy):>5}  ", style="cyan")
+        if len(self.providers) > 1:
+            line.append(f"{info.agent:<6} ", style=_AGENT_STYLE.get(info.agent, "grey62"))
         line.append(f"{(ov.model or '?'):<15.15} ", style="grey74")
         line.append(f"{ov.label:<22.22} ", style="bold")
         line.append(ov.last_shown, style="grey50")
@@ -63,11 +75,11 @@ class PickerScreen(Screen):
         option_list = self.query_one(OptionList)
         option_list.clear_options()
         self._by_id.clear()
-        sessions = self.provider.list_sessions()
+        sessions = list_sessions(self.providers)
         if not self.show_all:
             sessions = [s for s in sessions if s.age_seconds() <= self.config.active_window_seconds]
         scope = "all" if self.show_all else "active (15m)"
-        agent = "" if self.provider is CLAUDE else f"{self.provider.label} "
+        agent = agent_prefix(self.config.agent)
         self.query_one("#picker-title", Static).update(
             Text(f"Select a {agent}session to monitor — {len(sessions)} {scope}.  "
                  f"↑/↓ move · Enter open · a=all · r=reload · q=quit", style="bold")
@@ -192,9 +204,8 @@ class PoolCoderApp(App):
         self.pricing = pricing
 
     def on_mount(self) -> None:
-        provider = get_provider(self.config.agent)
-        if provider is not CLAUDE:
-            self.sub_title = provider.label  # Claude keeps its plain header
+        if providers_for(self.config.agent) != (CLAUDE,):
+            self.sub_title = agent_label(self.config.agent)  # Claude keeps its plain header
         if self.start_info is not None:
             self.push_screen(DashboardScreen(self.start_info, self.config, self.pricing))
         else:

@@ -312,7 +312,8 @@ def test_codex_fragment_list(codex_home):
 
 
 def test_codex_list_marks_a_thread_name_standing_in_for_the_prompt(monkeypatch):
-    info = SessionInfo(Path("x.jsonl"), cr.ROOT, "2026/09/22", datetime.now(timezone.utc), 1)
+    info = SessionInfo(Path("x.jsonl"), cr.ROOT, "2026/09/22", datetime.now(timezone.utc), 1,
+                       agent="codex")
     ov = SessionOverview(info=info, cwd="C:/p", model="gpt-5.6-sol", git_branch=None,
                          context_tokens=1, occupancy=0.5, last_text="Plan <the> editor",
                          is_live=True, last_is_title=True)
@@ -355,7 +356,7 @@ def test_engine_manager_codex_finds_and_folds_a_session(codex_home):
     _write_session(codex_home)
     manager = web.EngineManager(Config(agent="codex"), Pricing.load(), enable_plan_limits=False)
     try:
-        assert manager.provider is CODEX and manager.plan is None
+        assert manager.providers == (CODEX,) and manager.plans == {}
         snap = _loaded(manager, cr.ROOT)
         assert snap is not None and not snap.loading
         s = snap.session
@@ -377,7 +378,7 @@ def test_engine_manager_reuses_an_engine_before_looking_up(codex_home):
         lookups.append(sid)
         return CODEX.find_session(sid)
 
-    manager.provider = dataclasses.replace(CODEX, find_session=find)
+    manager.providers = (dataclasses.replace(CODEX, find_session=find),)
     try:
         for _ in range(3):
             assert manager.snapshot(cr.ROOT) is not None
@@ -428,9 +429,9 @@ def test_engine_manager_active_batch_has_no_cap_reuses_and_evicts(monkeypatch):
     monkeypatch.setattr(web, "_transcript_gone", lambda engine: False)
     manager = web.EngineManager(Config(), Pricing.load(), enable_plan_limits=False,
                                 max_engines=2, idle_ttl=0)
-    manager.plan = FakePlan()
-    manager.provider = dataclasses.replace(
-        CLAUDE, list_sessions=lambda: [stale, *reversed(active)])
+    manager.plans = {"claude": FakePlan()}
+    manager.providers = (dataclasses.replace(
+        CLAUDE, list_sessions=lambda: [stale, *reversed(active)]),)
     try:
         snaps = manager.active_snapshots()
         assert [snap.session.session_id for snap in snaps] == [f"session-{i}" for i in range(10)]
@@ -444,8 +445,8 @@ def test_engine_manager_active_batch_has_no_cap_reuses_and_evicts(monkeypatch):
                     for i, info in enumerate(active)]
         newest = SessionInfo(Path("new.jsonl"), "session-new", "new-project",
                              now + timedelta(minutes=1), 1)
-        manager.provider = dataclasses.replace(
-            manager.provider, list_sessions=lambda: [newest, *reversed(reranked)])
+        manager.providers = (dataclasses.replace(
+            manager.providers[0], list_sessions=lambda: [newest, *reversed(reranked)]),)
         snaps = manager.active_snapshots()
         assert [snap.session.session_id for snap in snaps] == [
             *(f"session-{i}" for i in range(10)), "session-new"]
@@ -456,7 +457,7 @@ def test_engine_manager_active_batch_has_no_cap_reuses_and_evicts(monkeypatch):
         assert len(created) == 11
 
         # Once the batch no longer protects those ids, normal idle eviction applies.
-        manager.provider = dataclasses.replace(manager.provider, list_sessions=lambda: [])
+        manager.providers = (dataclasses.replace(manager.providers[0], list_sessions=lambda: []),)
         for sid in manager._last:
             manager._last[sid] -= 1
         assert manager.active_snapshots() == []
@@ -474,12 +475,12 @@ def test_engine_manager_one_engine_per_thread_however_its_id_is_spelled(codex_ho
         lookups.append(sid)
         return CODEX.find_session(sid)
 
-    manager.provider = dataclasses.replace(CODEX, find_session=find)
+    manager.providers = (dataclasses.replace(CODEX, find_session=find),)
     try:
         for sid in (cr.ROOT, cr.ROOT.upper(), f" {cr.ROOT}\t"):
             snap = manager.snapshot(sid)
             assert snap is not None and snap.session.session_id == cr.ROOT
-        assert lookups == [cr.ROOT] and list(manager._engines) == [cr.ROOT]
+        assert lookups == [cr.ROOT] and list(manager._engines) == [("codex", cr.ROOT)]
     finally:
         manager.stop_all()
 
@@ -533,8 +534,9 @@ def test_engine_manager_plan_source_comes_from_the_provider(codex_home, monkeypa
     _write_session(codex_home)
     manager = web.EngineManager(Config(agent="codex"), Pricing.load())
     try:
-        assert isinstance(manager.plan, CodexLimitsSource)
-        manager.plan.fetch_once()
+        assert list(manager.plans) == ["codex"]
+        assert isinstance(manager.plans["codex"], CodexLimitsSource)
+        manager.plans["codex"].fetch_once()
         snap = _loaded(manager, cr.ROOT)
         assert snap.plan_limits is not None and snap.plan_limits.available
         assert snap.plan_limits.plan_type == "business"
@@ -555,10 +557,10 @@ def test_engine_manager_plan_source_comes_from_the_provider(codex_home, monkeypa
 
     monkeypatch.setattr(plan_limits, "PlanLimitsSource", FakePlan)
     manager = web.EngineManager(Config(), Pricing.load())
-    assert manager.provider is CLAUDE
-    assert isinstance(manager.plan, FakePlan) and manager.plan.started
+    assert manager.providers == (CLAUDE,) and list(manager.plans) == ["claude"]
+    assert isinstance(manager.plans["claude"], FakePlan) and manager.plans["claude"].started
     manager.stop_all()
-    assert manager.plan.stopped
+    assert manager.plans["claude"].stopped
 
 
 @pytest.fixture

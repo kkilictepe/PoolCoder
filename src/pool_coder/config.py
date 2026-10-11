@@ -91,7 +91,7 @@ class Config:
     auto_bump: bool = True
     plan_limits: bool = True
     active_window_seconds: int = ACTIVE_WINDOW_SECONDS
-    agent: str = "claude"  # which agent's sessions to monitor ("claude" | "codex")
+    agent: str = "claude"  # which agent's sessions to monitor ("claude" | "codex" | "all")
 
     def window_for(self, model: str | None, observed_max: int = 0,
                    agent: str | None = None) -> int:

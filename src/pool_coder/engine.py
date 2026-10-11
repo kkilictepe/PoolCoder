@@ -6,7 +6,8 @@ It publishes immutable ``Snapshot``s under a lock; the UI calls
 contract (plus ``pricing``, which is pure).
 
 Which fold, transcript source and plan-limit source a session gets comes from
-its agent's provider (``config.agent``: Claude Code by default, or Codex).
+its agent's provider (``session.agent``: Claude Code or Codex), so one config
+can monitor either agent's sessions (``--agent all``).
 """
 
 from __future__ import annotations
@@ -32,7 +33,7 @@ class Engine:
             project_hash=session.project_hash,
             main_path=str(session.main_path),
         )
-        self.provider = get_provider(self.config.agent)
+        self.provider = get_provider(session.agent)
         self.agg, self.jsonl = self.provider.open_session(self.state, self.config)
         self.plan = (self.provider.make_plan_source()
                      if (enable_plan_limits and self.config.plan_limits) else None)
